@@ -89,7 +89,20 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     // randomizes via a DTB kaslr-seed instead) and for any x86 kernel built
     // without `--emit-relocs`.
     let relocs = match parsed_kernel.elf {
-        Some(_) => kernel::extract_relocs(&kernel_bytes).context("extract KASLR relocations")?,
+        Some(_) => {
+            let r = kernel::extract_relocs(&kernel_bytes).context("extract KASLR relocations")?;
+            if r.is_empty() {
+                // An x86 kernel with no relocation data cannot be virtually
+                // randomized — tatu would have to enter it at a fixed virtual
+                // base. arma refuses to produce a non-KASLR image rather than
+                // silently weaken the guest.
+                bail!(
+                    "x86 kernel has no relocation data (not built with --emit-relocs / \
+                     CONFIG_X86_NEED_RELOCS); arma requires a KASLR-capable kernel"
+                );
+            }
+            r
+        }
         None => kernel::Relocs::default(),
     };
     let relocs_bytes = relocs.to_section_bytes();
