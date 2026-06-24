@@ -1,0 +1,92 @@
+[package]
+name = "arma"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "arma"
+path = "src/main.rs"
+
+[dependencies]
+# tatu is embedded as a bare-metal binary via an artifact dependency. For now
+# arma only builds PMIs for its native host arch, so each build has exactly one
+# tatu artifact dependency and does not require Cargo multidep support.
+
+pmi.workspace = true
+ciborium = "0.2"
+goblin = { version = "0.10", default-features = false, features = [
+    "elf32",
+    "elf64",
+    "pe64",
+    "alloc",
+    "endian_fd",
+    "std",
+] }
+vm-fdt = "0.3"
+devtree.workspace = true
+flate2 = "1"
+ruzstd = "0.8"
+zerocopy = { version = "0.8", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+sha2 = "0.10"
+tempfile = "3"
+rstest = "0.23"
+burrow = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+tatu = { path = "deps/tatu", artifact = "bin", target = "x86_64-unknown-none" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+tatu = { path = "deps/tatu", artifact = "bin", target = "aarch64-unknown-none" }
+
+[workspace]
+members = ["deps/tatu", "deps/tatu/deps/dtb2acpi", "deps/tatu/deps/dtb2e820"]
+
+[workspace.package]
+license = "Apache-2.0"
+repository = "https://github.com/pichi-vm/arma"
+
+[workspace.dependencies]
+pmi = { git = "https://github.com/pichi-vm/pmi", version = "0.1" }
+devtree = { git = "https://github.com/pichi-vm/devtree", version = "0.1" }
+burrow = { git = "https://github.com/pichi-vm/burrow", version = "0.1" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# arma/tatu/dtb2acpi/dtb2e820 are full of hardware addresses (e820 maps, ACPI
+# tables, GPAs); digit-group separators on those are noise, not clarity.
+unreadable_literal = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+type_complexity = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+needless_continue = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+too_many_lines = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+trivially_copy_pass_by_ref = "allow"
+uninlined_format_args = "allow"
+

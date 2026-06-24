@@ -1,0 +1,17 @@
+[package]
+name = "dtb2acpi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+devtree.workspace = true
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1"
+
