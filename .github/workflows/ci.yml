@@ -50,15 +50,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets
 
   # arma cross-compiles tatu for the host arch's bare-metal target via bindeps,
-  # so each OS exercises a different firmware arch: x86_64-unknown-none on Linux,
-  # aarch64-unknown-none on Apple-silicon macOS. The image tests build real PMIs
-  # from real kernels (fetched + cached by burrow).
+  # so each OS exercises a different firmware arch: x86_64-unknown-none on Linux
+  # and Windows, aarch64-unknown-none on Apple-silicon macOS. Windows also guards
+  # PE emission on a Windows host (arma's output is a PE). The image tests build
+  # real PMIs from real kernels (fetched + cached by burrow).
   test:
     name: build + test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        os: [ubuntu-24.04, macos-latest, windows-2025]
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: -D warnings
