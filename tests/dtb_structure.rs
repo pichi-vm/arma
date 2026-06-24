@@ -17,11 +17,7 @@ use std::fs;
 use devtree::{NodeView, PropertyView, Tree, TreeView};
 use tempfile::TempDir;
 
-use common::build_pmi;
-#[cfg(target_arch = "aarch64")]
-use common::synthesize_arm64_image;
-#[cfg(target_arch = "x86_64")]
-use common::synthesize_vmlinux;
+use common::{build_pmi, host_kernel};
 
 fn dtb_bytes_from(pmi_bytes: &[u8]) -> Vec<u8> {
     let pe = goblin::pe::PE::parse(pmi_bytes).unwrap();
@@ -35,12 +31,13 @@ fn dtb_bytes_from(pmi_bytes: &[u8]) -> Vec<u8> {
     pmi_bytes[off..off + len].to_vec()
 }
 
+/// Build a PMI from the host's catalogued real kernel. Returns `None` when the
+/// kernel can't be downloaded (offline) so callers skip rather than fail.
 #[cfg(target_arch = "x86_64")]
-fn build_x86(cmdline: &str, with_initrd: bool) -> (TempDir, Vec<u8>) {
+fn build_x86(cmdline: &str, with_initrd: bool) -> Option<(TempDir, Vec<u8>)> {
+    let (kernel, config) = host_kernel()?;
     let tmp = TempDir::new().unwrap();
-    let kernel = tmp.path().join("kernel");
     let pmi = tmp.path().join("out.pmi");
-    fs::write(&kernel, synthesize_vmlinux(0x1000)).unwrap();
     let initrd = if with_initrd {
         let p = tmp.path().join("init");
         // Cpio-magic-prefixed payload — arma's initrd handler passes
@@ -51,20 +48,19 @@ fn build_x86(cmdline: &str, with_initrd: bool) -> (TempDir, Vec<u8>) {
     } else {
         None
     };
-    build_pmi(&kernel, initrd.as_deref(), cmdline, &pmi);
+    build_pmi(kernel, initrd.as_deref(), cmdline, config, &pmi);
     let bytes = fs::read(&pmi).unwrap();
-    (tmp, bytes)
+    Some((tmp, bytes))
 }
 
 #[cfg(target_arch = "aarch64")]
-fn build_aarch64(cmdline: &str) -> (TempDir, Vec<u8>) {
+fn build_aarch64(cmdline: &str) -> Option<(TempDir, Vec<u8>)> {
+    let (kernel, config) = host_kernel()?;
     let tmp = TempDir::new().unwrap();
-    let kernel = tmp.path().join("Image");
     let pmi = tmp.path().join("out.pmi");
-    fs::write(&kernel, synthesize_arm64_image()).unwrap();
-    build_pmi(&kernel, None, cmdline, &pmi);
+    build_pmi(kernel, None, cmdline, config, &pmi);
     let bytes = fs::read(&pmi).unwrap();
-    (tmp, bytes)
+    Some((tmp, bytes))
 }
 
 /// Find a node's property by name and read it as &str. Need to bind
@@ -88,7 +84,10 @@ fn prop_u32s<N: NodeView>(node: &N, name: &str) -> Option<Vec<u32>> {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn chosen_carries_exact_cmdline_x86() {
-    let (_tmp, pmi) = build_x86("ro single CUSTOM_TOKEN", true);
+    let Some((_tmp, pmi)) = build_x86("ro single CUSTOM_TOKEN", true) else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     let chosen = tree.find_path("/chosen").expect("/chosen present");
@@ -101,7 +100,10 @@ fn chosen_carries_exact_cmdline_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn chosen_carries_exact_cmdline_aarch64() {
-    let (_tmp, pmi) = build_aarch64("aarch64-mark another-token");
+    let Some((_tmp, pmi)) = build_aarch64("aarch64-mark another-token") else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     let chosen = tree.find_path("/chosen").expect("/chosen present");
@@ -114,7 +116,10 @@ fn chosen_carries_exact_cmdline_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn chosen_initrd_range_is_consistent_x86() {
-    let (_tmp, pmi) = build_x86("ro", true);
+    let Some((_tmp, pmi)) = build_x86("ro", true) else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     let chosen = tree.find_path("/chosen").expect("/chosen present");
@@ -147,7 +152,10 @@ fn chosen_initrd_range_is_consistent_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn chosen_omits_initrd_when_none_supplied() {
-    let (_tmp, pmi) = build_aarch64("ro");
+    let Some((_tmp, pmi)) = build_aarch64("ro") else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     let chosen = tree.find_path("/chosen").expect("/chosen present");
@@ -158,7 +166,10 @@ fn chosen_omits_initrd_when_none_supplied() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn base_has_no_cpus_node_x86() {
-    let (_tmp, pmi) = build_x86("ro", false);
+    let Some((_tmp, pmi)) = build_x86("ro", false) else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     // merged.md §1: the base declares nothing CPU-related; the host
@@ -172,7 +183,10 @@ fn base_has_no_cpus_node_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn base_has_no_cpus_node_aarch64() {
-    let (_tmp, pmi) = build_aarch64("ro");
+    let Some((_tmp, pmi)) = build_aarch64("ro") else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     // merged.md §1: the base declares nothing CPU-related; the host
@@ -186,7 +200,10 @@ fn base_has_no_cpus_node_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn x86_intc_two_nodes_lapic_and_ioapic() {
-    let (_tmp, pmi) = build_x86("ro", false);
+    let Some((_tmp, pmi)) = build_x86("ro", false) else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
 
@@ -229,7 +246,10 @@ fn x86_intc_two_nodes_lapic_and_ioapic() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn aarch64_psci_present_at_root() {
-    let (_tmp, pmi) = build_aarch64("ro");
+    let Some((_tmp, pmi)) = build_aarch64("ro") else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     // A2: PSCI is a root-level node (arm,psci.yaml), not under /firmware.
@@ -240,7 +260,10 @@ fn aarch64_psci_present_at_root() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn pci_host_bridge_present_x86() {
-    let (_tmp, pmi) = build_x86("ro", false);
+    let Some((_tmp, pmi)) = build_x86("ro", false) else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     let root = tree.root();
@@ -257,7 +280,10 @@ fn pci_host_bridge_present_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn pci_host_bridge_present_aarch64() {
-    let (_tmp, pmi) = build_aarch64("ro");
+    let Some((_tmp, pmi)) = build_aarch64("ro") else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let dtb = dtb_bytes_from(&pmi);
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     let root = tree.root();
@@ -287,13 +313,15 @@ fn emitted_dtb_passes_dt_validate() {
         );
         return;
     }
-    let cases = [
-        #[cfg(target_arch = "aarch64")]
-        ("aarch64", build_aarch64("console=ttyS0")),
-        #[cfg(target_arch = "x86_64")]
-        ("x86_64", build_x86("console=ttyS0", false)),
-    ];
-    for (name, (_tmp, pmi)) in cases {
+    #[cfg(target_arch = "aarch64")]
+    let built = build_aarch64("console=ttyS0").map(|p| ("aarch64", p));
+    #[cfg(target_arch = "x86_64")]
+    let built = build_x86("console=ttyS0", false).map(|p| ("x86_64", p));
+    let Some((name, (_tmp, pmi))) = built else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
+    {
         let dtb = dtb_bytes_from(&pmi);
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(format!("{name}.dtb"));

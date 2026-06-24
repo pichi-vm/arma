@@ -6,6 +6,7 @@
 mod common;
 
 use std::fs;
+use std::sync::OnceLock;
 
 use ciborium::de::from_reader;
 use pmi::vm::{Action, FillKind, Spec, vcpu};
@@ -13,50 +14,48 @@ use pmi::vm::{Action, FillKind, Spec, vcpu};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[cfg(target_arch = "aarch64")]
-use common::synthesize_arm64_image;
-#[cfg(target_arch = "x86_64")]
-use common::synthesize_vmlinux;
-use common::{build_pmi, find_pmi_vm};
+use common::{build_pmi, find_pmi_vm, host_kernel};
 
 // ---------------------------------------------------------------------------
-// Per-arch fixtures (built once per test).
+// Per-arch fixtures (built once for the whole suite from the host's catalogued
+// real kernel; tests skip cleanly when the kernel can't be downloaded).
 // ---------------------------------------------------------------------------
 
 struct Fixture {
-    _tmp: TempDir,
     pmi_bytes: Vec<u8>,
 }
 
 #[cfg(target_arch = "x86_64")]
-fn build_x86_fixture() -> Fixture {
-    let tmp = TempDir::new().unwrap();
-    let kernel = tmp.path().join("kernel");
-    let init = tmp.path().join("init");
-    let pmi = tmp.path().join("out.pmi");
-    fs::write(&kernel, synthesize_vmlinux(0x1000)).unwrap();
-    // Cpio-magic-prefixed payload — arma passes cpio through unchanged.
-    fs::write(&init, b"070701FAKE_CPIO_FOR_X86_FIXTURE").unwrap();
-    build_pmi(&kernel, Some(&init), "console=ttyS0", &pmi);
-    let bytes = fs::read(&pmi).unwrap();
-    Fixture {
-        _tmp: tmp,
-        pmi_bytes: bytes,
-    }
+fn x86_fixture() -> Option<&'static Fixture> {
+    static F: OnceLock<Option<Fixture>> = OnceLock::new();
+    F.get_or_init(|| {
+        let (kernel, config) = host_kernel()?;
+        let tmp = TempDir::new().unwrap();
+        let init = tmp.path().join("init");
+        let pmi = tmp.path().join("out.pmi");
+        // Cpio-magic-prefixed payload — arma passes cpio through unchanged.
+        fs::write(&init, b"070701FAKE_CPIO_FOR_X86_FIXTURE").unwrap();
+        build_pmi(kernel, Some(&init), "console=ttyS0", config, &pmi);
+        Some(Fixture {
+            pmi_bytes: fs::read(&pmi).unwrap(),
+        })
+    })
+    .as_ref()
 }
 
 #[cfg(target_arch = "aarch64")]
-fn build_aarch64_fixture() -> Fixture {
-    let tmp = TempDir::new().unwrap();
-    let kernel = tmp.path().join("Image");
-    let pmi = tmp.path().join("out.pmi");
-    fs::write(&kernel, synthesize_arm64_image()).unwrap();
-    build_pmi(&kernel, None, "console=hvc0", &pmi);
-    let bytes = fs::read(&pmi).unwrap();
-    Fixture {
-        _tmp: tmp,
-        pmi_bytes: bytes,
-    }
+fn aarch64_fixture() -> Option<&'static Fixture> {
+    static F: OnceLock<Option<Fixture>> = OnceLock::new();
+    F.get_or_init(|| {
+        let (kernel, config) = host_kernel()?;
+        let tmp = TempDir::new().unwrap();
+        let pmi = tmp.path().join("out.pmi");
+        build_pmi(kernel, None, "console=hvc0", config, &pmi);
+        Some(Fixture {
+            pmi_bytes: fs::read(&pmi).unwrap(),
+        })
+    })
+    .as_ref()
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +65,10 @@ fn build_aarch64_fixture() -> Fixture {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn pe_validity_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     assert_eq!(&f.pmi_bytes[..2], b"MZ");
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).expect("parse PE");
     assert_eq!(pe.header.coff_header.machine, 0x8664);
@@ -80,7 +82,10 @@ fn pe_validity_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn pe_validity_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     assert_eq!(&f.pmi_bytes[..2], b"MZ");
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).expect("parse PE");
     assert_eq!(pe.header.coff_header.machine, 0xAA64);
@@ -94,7 +99,10 @@ fn pe_validity_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn pmi_core_conformance_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     // Use the arch-specific decoder path directly to avoid the
     // generic CBOR retry gymnastics above.
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
@@ -137,7 +145,10 @@ fn pmi_core_conformance_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn pmi_core_conformance_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
@@ -198,14 +209,20 @@ fn check_granularity(pmi_bytes: &[u8]) {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn granularity_rules_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     check_granularity(&f.pmi_bytes);
 }
 
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn granularity_rules_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     check_granularity(&f.pmi_bytes);
 }
 
@@ -216,7 +233,10 @@ fn granularity_rules_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn cbor_round_trip_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
     let spec: Spec<vcpu::x86_64::CpuState> = from_reader(cbor).expect("decode 1");
@@ -233,7 +253,10 @@ fn cbor_round_trip_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn cbor_round_trip_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
     let spec: Spec<vcpu::aarch64::CpuState> = from_reader(cbor).expect("decode 1");
@@ -251,7 +274,10 @@ fn cbor_round_trip_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn manifest_correctness_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     assert_eq!(spec.merged_dtb.as_deref(), Some(".tatu.dtb"));
@@ -272,7 +298,10 @@ fn manifest_correctness_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn manifest_correctness_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     assert_eq!(spec.merged_dtb.as_deref(), Some(".tatu.dtb"));
@@ -318,14 +347,24 @@ fn check_tatu_bootinfo_header(pmi_bytes: &[u8]) {
     let relocs64_count = u32::from_le_bytes(hdr[64..68].try_into().unwrap());
     let relocs32neg_count = u32::from_le_bytes(hdr[68..72].try_into().unwrap());
     let relocs32_count = u32::from_le_bytes(hdr[72..76].try_into().unwrap());
-    // The synthetic vmlinux fixture has entry == load base, so the recorded
-    // entry GPA equals the kernel GPA; in general it lies within the image.
-    assert_eq!(kernel_entry_gpa, kernel_gpa, "entry GPA at image base");
-    // The fixture ELF carries no `.rela.*`, so the KASLR relocs are absent.
-    assert_eq!(relocs_gpa, 0, "no relocs in fixture");
-    assert_eq!(relocs64_count, 0);
-    assert_eq!(relocs32neg_count, 0);
-    assert_eq!(relocs32_count, 0);
+    // The entry GPA lies within the loaded kernel image.
+    assert!(
+        kernel_entry_gpa >= kernel_gpa && kernel_entry_gpa < kernel_gpa + u64::from(kernel_size),
+        "entry GPA {kernel_entry_gpa:#x} within image [{kernel_gpa:#x}, +{kernel_size:#x})"
+    );
+    // KASLR relocs are an x86 concern: arma applies the appended reloc table so
+    // the recorded GPA is non-zero with at least the 64-bit list (the signed-32
+    // list is empty on kernels ≥ v6.15). aarch64 randomizes via the DTB
+    // kaslr-seed instead, so the bootinfo carries no reloc table at all.
+    if cfg!(target_arch = "x86_64") {
+        assert_ne!(relocs_gpa, 0, "relocs present for a KASLR-capable kernel");
+        assert!(relocs64_count > 0, "64-bit relocs present");
+    } else {
+        assert_eq!(relocs_gpa, 0, "aarch64 uses the DTB kaslr-seed, no relocs");
+        assert_eq!(relocs64_count, 0);
+        assert_eq!(relocs32neg_count, 0);
+        assert_eq!(relocs32_count, 0);
+    }
     // Bootinfo carries NATURAL byte counts (what tatu/Linux read).
     // `.dtb` is Data-shape padded (VirtSize == RawSize, both ≥ natural).
     // `.linux` is Padded-shape on x86: VirtualSize includes the bzImage
@@ -366,14 +405,20 @@ fn check_tatu_bootinfo_header(pmi_bytes: &[u8]) {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn tatu_bootinfo_header_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     check_tatu_bootinfo_header(&f.pmi_bytes);
 }
 
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn tatu_bootinfo_header_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     check_tatu_bootinfo_header(&f.pmi_bytes);
 }
 
@@ -384,7 +429,10 @@ fn tatu_bootinfo_header_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn tatu_sections_present_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let names: std::collections::HashSet<String> = pe
         .sections
@@ -405,7 +453,10 @@ fn tatu_sections_present_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn tatu_sections_present_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let names: std::collections::HashSet<String> = pe
         .sections
@@ -429,7 +480,10 @@ fn tatu_sections_present_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn base_dtb_parses_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let dtb_sec = pe
         .sections
@@ -445,7 +499,10 @@ fn base_dtb_parses_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn base_dtb_parses_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let dtb_sec = pe
         .sections
@@ -465,7 +522,10 @@ fn base_dtb_parses_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn vcpu_register_validity_x86() {
-    let f = build_x86_fixture();
+    let Some(f) = x86_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     assert_eq!(spec.vcpu.rip, 0xFFFF_FFF0, "rip is the reset vector");
@@ -490,7 +550,10 @@ fn vcpu_register_validity_x86() {
 #[test]
 #[cfg(target_arch = "aarch64")]
 fn vcpu_register_validity_aarch64() {
-    let f = build_aarch64_fixture();
+    let Some(f) = aarch64_fixture() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     // pstate.M[3:0] = 0x5 (EL1h); M[4] = 0 (AArch64).
@@ -521,16 +584,18 @@ fn vcpu_register_validity_aarch64() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn determinism_two_builds_same_inputs_same_output() {
+    let Some((kernel, config)) = host_kernel() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     let tmp = TempDir::new().unwrap();
-    let kernel = tmp.path().join("kernel");
     let init = tmp.path().join("init");
     let pmi1 = tmp.path().join("out1.pmi");
     let pmi2 = tmp.path().join("out2.pmi");
-    fs::write(&kernel, synthesize_vmlinux(0x2000)).unwrap();
     // Cpio-magic-prefixed payload — arma passes cpio through unchanged.
     fs::write(&init, b"070701DETERMINISTIC_CPIO").unwrap();
-    build_pmi(&kernel, Some(&init), "ro", &pmi1);
-    build_pmi(&kernel, Some(&init), "ro", &pmi2);
+    build_pmi(kernel, Some(&init), "ro", config, &pmi1);
+    build_pmi(kernel, Some(&init), "ro", config, &pmi2);
     let b1 = fs::read(&pmi1).unwrap();
     let b2 = fs::read(&pmi2).unwrap();
     let h1 = Sha256::digest(&b1);
@@ -551,8 +616,8 @@ fn single_binary_emits_both_arch_pmis() {
     // §15.3: a single arma binary builds PMIs for both x86_64 and
     // aarch64. We already exercise both fixtures elsewhere; this test
     // explicitly asserts that the PE Machine fields differ.
-    let f86 = build_x86_fixture();
-    let farm = build_aarch64_fixture();
+    let f86 = x86_fixture().unwrap();
+    let farm = aarch64_fixture().unwrap();
     let m86 = goblin::pe::PE::parse(&f86.pmi_bytes)
         .unwrap()
         .header

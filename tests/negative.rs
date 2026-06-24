@@ -15,7 +15,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use common::{arma_bin, synthesize_vmlinux};
+use common::{arma_bin, host_kernel};
 
 fn run_failing(args: &[&std::ffi::OsStr]) -> (i32, String) {
     let out = Command::new(arma_bin())
@@ -80,15 +80,18 @@ fn malformed_kernel_fails_with_unrecognized() {
 
 #[test]
 fn unwritable_output_path_fails() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = tmp.path().join("kernel");
-    fs::write(&kernel, synthesize_vmlinux(0x1000)).unwrap();
+    let Some((kernel, config)) = host_kernel() else {
+        eprintln!("skip (kernel download failed)");
+        return;
+    };
     // /proc/1/cannot-write is unwritable from any user.
     let unwritable: std::path::PathBuf = "/proc/1/cannot-write.pmi".into();
     let (_code, stderr) = run_failing(&[
         "build".as_ref(),
         "--kernel".as_ref(),
         kernel.as_os_str(),
+        "--config".as_ref(),
+        config.as_os_str(),
         "--cmdline".as_ref(),
         "console=ttyS0".as_ref(),
         "--profile".as_ref(),
