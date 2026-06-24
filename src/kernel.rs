@@ -313,6 +313,12 @@ pub(crate) struct Relocs {
 }
 
 impl Relocs {
+    /// Whether no relocations were extracted — i.e. the kernel carries no
+    /// KASLR relocation data (not built with `--emit-relocs`).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.relocs64.is_empty() && self.relocs32neg.is_empty() && self.relocs32.is_empty()
+    }
+
     /// Serialize as the PMI relocs-section payload: the three `u32`-LE arrays
     /// back to back in the order `relocs64`, `relocs32neg`, `relocs32`. Each
     /// array's length is carried separately in `TatuBootInfo`, so tatu can slice
@@ -346,6 +352,7 @@ const SHN_UNDEF: usize = 0;
 const SHN_ABS: usize = 0xfff1;
 const SHN_XINDEX: usize = 0xffff;
 const SHT_NOTE: u32 = 7;
+const SHT_NOBITS: u32 = 8;
 const SHF_ALLOC: u64 = 0x2;
 
 /// Symbols the linker marks absolute but which still move with the kernel image
@@ -475,6 +482,17 @@ fn is_percpu_sym(st_shndx: usize, name: &str, percpu: &PerCpu) -> bool {
 /// (`CONFIG_X86_NEED_RELOCS=y`) retains the `.rela.*` sections this needs.
 pub(crate) fn extract_relocs(bytes: &[u8]) -> Result<Relocs, KernelError> {
     let elf = Elf::parse(bytes).map_err(|_| KernelError::ElfMalformed("goblin parse failed"))?;
+
+    // Two on-disk encodings exist. A `--emit-relocs` `vmlinux` (e.g. firecracker
+    // CI) keeps `.rela.*` sections, walked below. A stock distro bzImage is
+    // `objcopy`'d to drop them, but a relocatable kernel
+    // (`CONFIG_X86_NEED_RELOCS=y`) appends a `vmlinux.relocs` table after the
+    // image — the same table the kernel's own `handle_relocations()` reads at
+    // boot. Fall back to parsing that.
+    if elf.shdr_relocs.is_empty() {
+        return extract_appended_relocs(&elf, bytes);
+    }
+
     let span = elf_span(&elf)?;
     let percpu = find_percpu(&elf)?;
 
@@ -573,6 +591,114 @@ pub(crate) fn extract_relocs(bytes: &[u8]) -> Result<Relocs, KernelError> {
     }
 
     Ok(out)
+}
+
+/// Extract KASLR relocations from a `vmlinux.relocs` table appended after the
+/// kernel image. A stock distro bzImage is `objcopy`'d so it has no `.rela.*`
+/// sections, but a relocatable kernel concatenates this table onto the image
+/// before compression (`vmlinux.bin.all`).
+///
+/// Mirrors the boot-time `arch/x86/boot/compressed/misc.c::handle_relocations`:
+/// each entry is the low 32 bits of a sign-extended kernel VA, stored here as the
+/// image offset `VA - text_vaddr` (the same form the `.rela` path produces). The
+/// kernel emits the lists low→high as `[0][relocs64][0][relocs32]` (current), or
+/// `[0][relocs64][0][relocs32neg][0][relocs32]` before commit a8327be7b2aa
+/// ("x86/boot/64: Remove inverse relocations", v6.15). Read backward from the end
+/// we always get `relocs32` first and `relocs64` last, with the inverse-32
+/// (`relocs32neg`) list in between only on older kernels.
+///
+/// The two layouts are indistinguishable by content (a `relocs32neg` entry looks
+/// exactly like a `relocs64` one), so we disambiguate structurally: the table is
+/// concatenated directly onto the ELF, so its start is the ELF's exact file end.
+/// Reading the zero-terminated lists from the payload end down to that precise
+/// boundary yields an unambiguous list count — 2 ⇒ `[relocs32, relocs64]`,
+/// 3 ⇒ `[relocs32, relocs32neg, relocs64]`. Mislabeling the 64-bit list as
+/// `relocs32neg` would apply 4-byte `-delta` patches where 8-byte `+delta` are
+/// needed and corrupt the kernel.
+///
+/// Returns empty relocs when there is no appended table (a kernel built without
+/// `--emit-relocs`); the caller treats that as KASLR-incapable. An out-of-range
+/// entry or an unexpected list count means the boundary or the table is wrong,
+/// which we surface as an error rather than silently mis-patching.
+fn extract_appended_relocs(elf: &Elf<'_>, bytes: &[u8]) -> Result<Relocs, KernelError> {
+    let span = elf_span(elf)?;
+    let text_vaddr = elf
+        .program_headers
+        .iter()
+        .find(|p| p.p_type == PT_LOAD && p.p_memsz != 0 && p.p_paddr == span.min_paddr)
+        .map(|p| p.p_vaddr)
+        .ok_or(KernelError::ElfMalformed("no PT_LOAD at min_paddr"))?;
+    let image_size = span.max_mem_end.saturating_sub(span.min_paddr);
+
+    // The appended `vmlinux.relocs` table begins immediately at the ELF's file
+    // end, so compute that exactly: the furthest file offset any ELF structure
+    // occupies — the section-header table, every non-NOBITS section, and every
+    // segment. This is the precise table boundary, not a heuristic.
+    let mut table_start = elf.header.e_shoff.saturating_add(
+        u64::from(elf.header.e_shnum).saturating_mul(u64::from(elf.header.e_shentsize)),
+    );
+    for p in &elf.program_headers {
+        table_start = table_start.max(p.p_offset.saturating_add(p.p_filesz));
+    }
+    for s in &elf.section_headers {
+        if s.sh_type != SHT_NOBITS {
+            table_start = table_start.max(s.sh_offset.saturating_add(s.sh_size));
+        }
+    }
+    let table_start = usize::try_from(table_start).unwrap_or(usize::MAX);
+    if table_start >= bytes.len() {
+        return Ok(Relocs::default()); // no appended relocations ⇒ KASLR-incapable
+    }
+
+    // Read 32-bit LE entries backward from the payload end down to the exact
+    // table start, splitting into lists at each zero terminator.
+    let mut lists: Vec<Vec<u32>> = Vec::new();
+    let mut cur: Vec<u32> = Vec::new();
+    let mut pos = bytes.len();
+    while pos >= table_start + 4 {
+        let v = i32::from_le_bytes(bytes[pos - 4..pos].try_into().expect("slice is 4 bytes"));
+        pos -= 4;
+        if v == 0 {
+            lists.push(core::mem::take(&mut cur));
+            continue;
+        }
+        // Assert (not a boundary check): within the table every nonzero word is a
+        // reloc site — the low 32 bits of a sign-extended kernel VA.
+        let off = (i64::from(v) as u64)
+            .checked_sub(text_vaddr)
+            .filter(|&o| o < image_size)
+            .and_then(|o| u32::try_from(o).ok())
+            .ok_or(KernelError::ElfMalformed(
+                "appended reloc site outside image",
+            ))?;
+        cur.push(off);
+    }
+    // The leading terminator flushes the final (relocs64) list, so `cur` is empty.
+
+    // `lists` holds, in read (backward) order: relocs32, [relocs32neg,] relocs64.
+    Ok(match lists.len() {
+        2 => {
+            let mut it = lists.into_iter();
+            Relocs {
+                relocs32: it.next().unwrap_or_default(),
+                relocs32neg: Vec::new(),
+                relocs64: it.next().unwrap_or_default(),
+            }
+        }
+        3 => {
+            let mut it = lists.into_iter();
+            Relocs {
+                relocs32: it.next().unwrap_or_default(),
+                relocs32neg: it.next().unwrap_or_default(),
+                relocs64: it.next().unwrap_or_default(),
+            }
+        }
+        _ => {
+            return Err(KernelError::ElfMalformed(
+                "unexpected appended reloc list count",
+            ));
+        }
+    })
 }
 
 /// Unwrap an arm64 EFI-zboot kernel to its raw `Image`.
@@ -944,6 +1070,58 @@ mod tests {
     fn extract_vmlinux_passes_through_raw_vmlinux() {
         let elf = make_elf(0x100_0000, &[(0x100_0000, vec![0u8; 0x100], 0x100)]);
         assert_eq!(extract_vmlinux(elf.clone()).unwrap(), elf);
+    }
+
+    #[test]
+    fn extract_relocs_reads_appended_table() {
+        // A stripped bzImage-style payload: an ELF with no `.rela.*` sections and
+        // a `vmlinux.relocs` table appended after the image, in the boot format
+        // (forward: 0, relocs64.., 0, relocs32neg.., 0, relocs32..; each u32-LE a
+        // patch-site VA). text_vaddr = 0x100_0000, so VA - base = image offset.
+        let mut payload = make_elf(0x100_0000, &[(0x100_0000, vec![0u8; 0x100], 0x1_0000)]);
+        let push = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+        push(&mut payload, 0); // relocs64 terminator
+        push(&mut payload, 0x100_0040); // relocs64 -> off 0x40
+        push(&mut payload, 0); // relocs32neg terminator
+        push(&mut payload, 0x100_0030); // relocs32neg -> off 0x30
+        push(&mut payload, 0); // relocs32 terminator
+        push(&mut payload, 0x100_0020); // relocs32 -> off 0x20
+        push(&mut payload, 0x100_0010); // relocs32 -> off 0x10 (read first, backward)
+
+        let r = extract_relocs(&payload).unwrap();
+        assert_eq!(r.relocs32, vec![0x10, 0x20]);
+        assert_eq!(r.relocs32neg, vec![0x30]);
+        assert_eq!(r.relocs64, vec![0x40]);
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn extract_relocs_reads_appended_table_two_list() {
+        // Current kernels (after "x86/boot/64: Remove inverse relocations") emit
+        // only two lists, low→high: [0][relocs64][0][relocs32]. The 64-bit list
+        // must NOT be mistaken for the old inverse-32 list.
+        let mut payload = make_elf(0x100_0000, &[(0x100_0000, vec![0u8; 0x100], 0x1_0000)]);
+        let push = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+        push(&mut payload, 0); // relocs64 terminator (leading stop)
+        push(&mut payload, 0x100_0040); // relocs64 -> off 0x40
+        push(&mut payload, 0); // relocs32 terminator
+        push(&mut payload, 0x100_0020); // relocs32 -> off 0x20
+        push(&mut payload, 0x100_0010); // relocs32 -> off 0x10 (read first, backward)
+
+        let r = extract_relocs(&payload).unwrap();
+        assert_eq!(r.relocs32, vec![0x10, 0x20]);
+        assert!(r.relocs32neg.is_empty());
+        assert_eq!(r.relocs64, vec![0x40]);
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn extract_relocs_empty_without_table_or_rela() {
+        // No `.rela.*` sections and no appended table — a kernel genuinely built
+        // without relocations. arma reports none (the caller rejects it as
+        // KASLR-incapable) rather than misreading trailing image bytes.
+        let payload = make_elf(0x100_0000, &[(0x100_0000, vec![0u8; 0x100], 0x1_0000)]);
+        assert!(extract_relocs(&payload).unwrap().is_empty());
     }
 
     #[test]
