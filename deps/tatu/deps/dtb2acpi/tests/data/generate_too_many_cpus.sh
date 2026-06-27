@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Generate too_many_cpus.dts: 257 vCPUs — one past CPU_CACHE_CAP and
 # one past MADT's u8 processor_id limit. count's walk_cpus rejects
 # the 257th cpu as DtbError::TooManyCpus { limit: 256 }.

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 # Generate many_cpus.dts: 256 vCPUs with sequential APIC IDs 0..255.
 # Exercises the MADT Type 10 (x2APIC NMI) path, which triggers when
 # processor UID > 254. The existing cpu_high_apic_id fixture covers
