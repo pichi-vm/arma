@@ -283,6 +283,17 @@ pub(crate) fn elf_load_image(bytes: &[u8]) -> Result<Vec<u8>, KernelError> {
                 ))?;
         image[dst..dst + n].copy_from_slice(&bytes[src..src_end]);
     }
+    // Drop the flat image's trailing zeros (the kernel's .bss/.brk tail, plus any
+    // zero gap the last segment's p_filesz spans). The VMM restores them by
+    // zero-filling from `SizeOfRawData` to `VirtualSize` (the Padded shape, PMI
+    // spec §"Section Shapes"), so they need not occupy file bytes — shrinking the
+    // on-disk `.linux` section. Retain the exact content, rounded up to a 4 KiB
+    // page (guest pages are 4 KiB; the final page's tail is zero). This is the
+    // section's true data extent — no 2 MiB padding — so `SizeOfRawData` and the
+    // reported `kernel_size` are the real content size, never inflated.
+    let content_end = image.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let keep = content_end.next_multiple_of(0x1000).min(image.len());
+    image.truncate(keep);
     Ok(image)
 }
 
@@ -1028,10 +1039,28 @@ mod tests {
         );
         let img = elf_load_image(&elf).unwrap();
         // Image spans min_paddr..max_file_end = [0x100_0000, 0x100_2002).
+        // Last byte is non-zero, so nothing is trimmed.
         assert_eq!(img.len(), 0x2002);
         assert_eq!(&img[0..4], &[0xAB; 4]);
         assert_eq!(&img[4..0x2000], &vec![0u8; 0x2000 - 4][..]); // gap zero
         assert_eq!(&img[0x2000..0x2002], &[0xCD; 2]);
+    }
+
+    #[test]
+    fn elf_load_image_trims_trailing_zeros() {
+        // A segment whose p_filesz bakes in a zero tail (a .bss/.brk region
+        // stored in-file). elf_load_image must drop those trailing zeros so the
+        // .linux section becomes Padded (the VMM zero-fills to VirtualSize);
+        // the loaded content is unchanged.
+        let mut data = vec![0xABu8; 4];
+        data.extend(std::iter::repeat_n(0u8, 0x3000)); // 12 KiB zero tail in-file
+        let elf = make_elf(0x100_0000, &[(0x100_0000, data, 0x4000)]);
+        let img = elf_load_image(&elf).unwrap();
+        // 4 real bytes + a 0x3000 zero tail: trimmed to the real content, rounded
+        // up to one 4 KiB page. The rest is VirtualSize zero-fill (no 2 MiB pad).
+        assert_eq!(img.len(), 0x1000);
+        assert_eq!(&img[0..4], &[0xAB; 4]);
+        assert!(img[4..].iter().all(|&b| b == 0));
     }
 
     #[test]

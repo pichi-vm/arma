@@ -323,17 +323,21 @@ pub(crate) fn build_pe(machine: u16, sections: &[Section<'_>]) -> Result<Vec<u8>
             raw_offsets.push(0);
             raw_sizes.push(0);
         } else {
-            // Align file cursor up to this section's required boundary
-            // (4 KiB for SMALLs / non-loaded; 2 MiB for LARGEs per PMI
-            // granularity). The padding bytes are left as the zeros
-            // from the initial buf allocation.
+            // Align the section *start* (PointerToRawData) to its required
+            // boundary: 4 KiB for SMALLs / non-loaded, 2 MiB for LARGEs so a VMM
+            // can hand whole 2 MiB chunks to the copy (PMI granularity). The
+            // *size* (SizeOfRawData) follows FILE_ALIGNMENT only — the actual data
+            // extent, never padded up to 2 MiB. The granularity spec constrains
+            // only the start; a LARGE's sub-2 MiB tail loads at 4 KiB. Padding the
+            // size would bloat the file with zeros the Padded shape already
+            // supplies via VirtualSize.
             let align = alignment_for(s);
             cursor = align_up_u32(cursor, align).ok_or(PeError::Overflow)?;
             let data_len_u32: u32 = u32::try_from(s.data.len()).map_err(|_| PeError::Overflow)?;
-            let aligned_size = align_up_u32(data_len_u32, align).ok_or(PeError::Overflow)?;
+            let raw_size = align_up_u32(data_len_u32, FILE_ALIGNMENT).ok_or(PeError::Overflow)?;
             raw_offsets.push(cursor);
-            raw_sizes.push(aligned_size);
-            cursor = cursor.checked_add(aligned_size).ok_or(PeError::Overflow)?;
+            raw_sizes.push(raw_size);
+            cursor = cursor.checked_add(raw_size).ok_or(PeError::Overflow)?;
         }
     }
 
