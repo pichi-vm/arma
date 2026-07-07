@@ -91,6 +91,18 @@ pub(crate) fn write_name_seg(
     write_bytes(slot, pos, name)
 }
 
+/// Build a NameSeg from a 3-byte prefix and a hex index (`0`–`9`,
+/// `A`–`Z`): e.g. `name_seg_indexed(b"PCI", 0)` → `b"PCI0"`,
+/// `name_seg_indexed(b"MBR", 10)` → `b"MBRA"`.
+pub(crate) fn name_seg_indexed(prefix: &[u8; 3], index: u8) -> [u8; 4] {
+    let suffix = if index < 10 {
+        b'0'.saturating_add(index)
+    } else {
+        b'A'.saturating_add(index.saturating_sub(10))
+    };
+    [prefix[0], prefix[1], prefix[2], suffix]
+}
+
 /// `Name(<name>, <ByteConst>)` — 7 bytes total.
 pub(crate) fn write_name_byte(
     slot: &mut [u8],
