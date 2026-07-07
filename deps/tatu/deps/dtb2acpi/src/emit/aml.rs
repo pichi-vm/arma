@@ -332,6 +332,33 @@ pub(crate) fn write_end_tag(slot: &mut [u8], pos: usize) -> Result<usize, DtbErr
 
 pub(crate) const END_TAG_BYTES: usize = 2;
 
+/// Byte cost of the `Name(_CRS, Buffer(…))` wrapper around resource
+/// descriptors: NameOp(1) + `_CRS`(4) + BufferOp(1) + PkgLength(2) +
+/// WordPrefix+u16(3) = 11 bytes.
+pub(crate) const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + PKG_LENGTH_BYTES + 3;
+
+/// Write the `Name(_CRS, Buffer(<descriptors>))` preamble: NameOp +
+/// `_CRS` + BufferOp + PkgLength + WordPrefix + buffer-size u16.
+/// `descriptor_bytes` is the total byte count of the resource
+/// descriptors that will follow (the caller writes those next).
+pub(crate) fn write_crs_buffer_header(
+    slot: &mut [u8],
+    pos: usize,
+    descriptor_bytes: usize,
+) -> Result<usize, DtbError> {
+    let buffer_size = u16::try_from(descriptor_bytes).map_err(|_| DtbError::Internal)?;
+    let buf_pkg_value = PKG_LENGTH_BYTES
+        .checked_add(3)
+        .and_then(|v| v.checked_add(descriptor_bytes))
+        .ok_or(DtbError::Internal)?;
+    let pos = write_bytes(slot, pos, &[NAME_OP])?;
+    let pos = write_name_seg(slot, pos, b"_CRS")?;
+    let pos = write_bytes(slot, pos, &[BUFFER_OP])?;
+    let pos = write_pkg_length(slot, pos, buf_pkg_value)?;
+    let pos = write_bytes(slot, pos, &[WORD_PREFIX])?;
+    write_bytes(slot, pos, &buffer_size.to_le_bytes())
+}
+
 /// Append `bytes` at `pos`, returning the new position.
 pub(crate) fn write_bytes(slot: &mut [u8], pos: usize, bytes: &[u8]) -> Result<usize, DtbError> {
     let end = pos.checked_add(bytes.len()).ok_or(DtbError::Internal)?;
