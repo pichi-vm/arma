@@ -85,10 +85,7 @@ fn write_device<N: NodeView + Copy>(
     let reg_io_width = node.property_u32("reg-io-width", crate::error::Site::Serial)?;
     let clock_frequency = node.property_u32("clock-frequency", crate::error::Site::Serial)?;
 
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    let pkg_value = DEVICE_BYTES.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let pos = aml::write_name_seg(slot, pos, b"SER0")?;
+    let pos = aml::write_device_header(slot, pos, b"SER0", DEVICE_BYTES)?;
 
     // RSCV0003 is the generic ACPI 16550A UART ID matched by Linux's
     // serial8250 ACPI platform driver. It is MMIO because _CRS below exposes
