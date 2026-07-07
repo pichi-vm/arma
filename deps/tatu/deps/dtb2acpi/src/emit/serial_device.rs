@@ -8,7 +8,7 @@
 //! DSDT device gives the ACPI serial driver an MMIO window and GSI so
 //! the 8250 stack can bind a `ttyS*` port without any legacy ISA I/O.
 
-use devtree::{NodeView, PropertyView, TreeView};
+use devtree::{NodeView, TreeView};
 
 use super::aml;
 use crate::dtb::DtbNode;
@@ -18,10 +18,6 @@ use crate::error::DtbError;
 /// Fixed body bytes per Device(SER0) before `_CRS` / `_DSD`:
 /// `_HID` (string-valued name) + `_UID` (Byte-valued name).
 const FIXED_NAMES_BYTES: usize = (1 + 4 + aml::string_bytes(8)) + (1 + 4 + 1 + 1);
-
-/// `_CRS` wrapper bytes around the resource descriptors:
-/// `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descriptors>))`.
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
 
 /// QWordMemory(serial MMIO) + ExtendedInterrupt(GSI) + EndTag.
 const CRS_DESCRIPTOR_BYTES: usize =
@@ -40,7 +36,7 @@ const DSD_BYTES: usize = 1 + 4 + DSD_PACKAGE_BYTES;
 
 /// Total bytes occupied by the serial ACPI device when present.
 pub(crate) const DEVICE_BYTES: usize = {
-    let crs = CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
+    let crs = aml::CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
     let body = FIXED_NAMES_BYTES + crs + DSD_BYTES;
     // DeviceOp(2) + PkgLength(2) + NameSeg(4) + body
     2 + aml::PKG_LENGTH_BYTES + 4 + body
@@ -89,10 +85,7 @@ fn write_device<N: NodeView + Copy>(
     let reg_io_width = node.property_u32("reg-io-width", crate::error::Site::Serial)?;
     let clock_frequency = node.property_u32("clock-frequency", crate::error::Site::Serial)?;
 
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    let pkg_value = DEVICE_BYTES.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let pos = aml::write_name_seg(slot, pos, b"SER0")?;
+    let pos = aml::write_device_header(slot, pos, b"SER0", DEVICE_BYTES)?;
 
     // RSCV0003 is the generic ACPI 16550A UART ID matched by Linux's
     // serial8250 ACPI platform driver. It is MMIO because _CRS below exposes
@@ -100,21 +93,9 @@ fn write_device<N: NodeView + Copy>(
     let pos = aml::write_name_string(slot, pos, b"_HID", b"RSCV0003")?;
     let pos = aml::write_name_byte(slot, pos, b"_UID", 0)?;
 
-    let buffer_size = u16::try_from(CRS_DESCRIPTOR_BYTES).map_err(|_| DtbError::Internal)?;
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES + 3 /* WordPrefix + u16 */ + CRS_DESCRIPTOR_BYTES;
+    let pos = aml::write_crs_buffer_header(slot, pos, CRS_DESCRIPTOR_BYTES)?;
 
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
-
-    // interrupts = <pin sense>; the trigger lives in the second cell.
-    let int_prop = node.node.property("interrupts").ok_or(DtbError::Internal)?;
-    let mut int_cells = int_prop.as_u32s().ok_or(DtbError::Internal)?;
-    let _pin = int_cells.next().ok_or(DtbError::Internal)?;
-    let sense = int_cells.next().ok_or(DtbError::Internal)?;
+    let (_pin, sense) = node.decode_interrupts_2(crate::error::Site::Serial)?;
 
     let pos = aml::write_qword_memory(slot, pos, base, size)?;
     let pos = aml::write_extended_interrupt(slot, pos, gsi, sense)?;

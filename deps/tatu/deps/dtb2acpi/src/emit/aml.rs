@@ -91,6 +91,34 @@ pub(crate) fn write_name_seg(
     write_bytes(slot, pos, name)
 }
 
+/// Write the AML `Device(<name>)` header: ExtOpPrefix + DeviceOp +
+/// 2-byte PkgLength + 4-byte NameSeg. `total_bytes` is the complete
+/// device size (including the 2-byte DeviceOp prefix); the PkgLength
+/// covers everything after the prefix.
+pub(crate) fn write_device_header(
+    slot: &mut [u8],
+    pos: usize,
+    name: &[u8; 4],
+    total_bytes: usize,
+) -> Result<usize, DtbError> {
+    let pos = write_bytes(slot, pos, &[EXT_OP_PREFIX, DEVICE_OP])?;
+    let pkg_value = total_bytes.checked_sub(2).ok_or(DtbError::Internal)?;
+    let pos = write_pkg_length(slot, pos, pkg_value)?;
+    write_name_seg(slot, pos, name)
+}
+
+/// Build a NameSeg from a 3-byte prefix and a hex index (`0`–`9`,
+/// `A`–`Z`): e.g. `name_seg_indexed(b"PCI", 0)` → `b"PCI0"`,
+/// `name_seg_indexed(b"MBR", 10)` → `b"MBRA"`.
+pub(crate) fn name_seg_indexed(prefix: &[u8; 3], index: u8) -> [u8; 4] {
+    let suffix = if index < 10 {
+        b'0'.saturating_add(index)
+    } else {
+        b'A'.saturating_add(index.saturating_sub(10))
+    };
+    [prefix[0], prefix[1], prefix[2], suffix]
+}
+
 /// `Name(<name>, <ByteConst>)` — 7 bytes total.
 pub(crate) fn write_name_byte(
     slot: &mut [u8],
@@ -331,6 +359,33 @@ pub(crate) fn write_end_tag(slot: &mut [u8], pos: usize) -> Result<usize, DtbErr
 }
 
 pub(crate) const END_TAG_BYTES: usize = 2;
+
+/// Byte cost of the `Name(_CRS, Buffer(…))` wrapper around resource
+/// descriptors: NameOp(1) + `_CRS`(4) + BufferOp(1) + PkgLength(2) +
+/// WordPrefix+u16(3) = 11 bytes.
+pub(crate) const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + PKG_LENGTH_BYTES + 3;
+
+/// Write the `Name(_CRS, Buffer(<descriptors>))` preamble: NameOp +
+/// `_CRS` + BufferOp + PkgLength + WordPrefix + buffer-size u16.
+/// `descriptor_bytes` is the total byte count of the resource
+/// descriptors that will follow (the caller writes those next).
+pub(crate) fn write_crs_buffer_header(
+    slot: &mut [u8],
+    pos: usize,
+    descriptor_bytes: usize,
+) -> Result<usize, DtbError> {
+    let buffer_size = u16::try_from(descriptor_bytes).map_err(|_| DtbError::Internal)?;
+    let buf_pkg_value = PKG_LENGTH_BYTES
+        .checked_add(3)
+        .and_then(|v| v.checked_add(descriptor_bytes))
+        .ok_or(DtbError::Internal)?;
+    let pos = write_bytes(slot, pos, &[NAME_OP])?;
+    let pos = write_name_seg(slot, pos, b"_CRS")?;
+    let pos = write_bytes(slot, pos, &[BUFFER_OP])?;
+    let pos = write_pkg_length(slot, pos, buf_pkg_value)?;
+    let pos = write_bytes(slot, pos, &[WORD_PREFIX])?;
+    write_bytes(slot, pos, &buffer_size.to_le_bytes())
+}
 
 /// Append `bytes` at `pos`, returning the new position.
 pub(crate) fn write_bytes(slot: &mut [u8], pos: usize, bytes: &[u8]) -> Result<usize, DtbError> {

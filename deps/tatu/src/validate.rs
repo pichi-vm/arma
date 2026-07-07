@@ -228,7 +228,12 @@ pub(crate) fn validate_merged<T: TreeView>(tree: &T, pa_bits: u32) -> Result<(),
     for child in tree.root().children() {
         match top_segment(child.name()) {
             "cpus" => count_cpus(&child, &mut cpu_count)?,
-            "memory" => extract_memory(&child, &mut memory, pa_bits)?,
+            "memory" => extract_regs(
+                &child,
+                &mut memory,
+                pa_bits,
+                ValidationError::TooManyMemoryRegions,
+            )?,
             // Any other top-level node carrying a `reg` is a platform device
             // (E1, §4.4). Matching by structure (has `reg`), not by node name,
             // is robust to the device-model's names (interrupt-controller@,
@@ -236,7 +241,12 @@ pub(crate) fn validate_merged<T: TreeView>(tree: &T, pa_bits: u32) -> Result<(),
             // every device MMIO region rather than a hand-listed subset.
             _ => {
                 if NodeView::property(&child, "reg").is_some() {
-                    extract_device_regs(&child, &mut devices, pa_bits)?;
+                    extract_regs(
+                        &child,
+                        &mut devices,
+                        pa_bits,
+                        ValidationError::TooManyDeviceRanges,
+                    )?;
                 }
             }
         }
@@ -258,14 +268,14 @@ fn count_cpus<N: NodeView>(node: &N, count: &mut usize) -> Result<(), Validation
     Ok(())
 }
 
-/// Extract a `/memory@*` node's `reg` pairs into `regions`. Host
-/// can add memory nodes per §4.2, so validation here is adversarial
-/// (`reg` byte-shape and per-region overflow/canonical/nonzero per
-/// merged.md §2's "Address-bearing values" rule).
-fn extract_memory<N: NodeView>(
+/// Parse a node's `reg` property into validated `(gpa, size)` regions,
+/// pushing each into `regions`. `overflow_err` is returned when the
+/// ArrayVec is full.
+fn extract_regs<N: NodeView, const CAP: usize>(
     node: &N,
-    regions: &mut ArrayVec<Region, MAX_MEMORY_REGIONS>,
+    regions: &mut ArrayVec<Region, CAP>,
     pa_bits: u32,
+    overflow_err: ValidationError,
 ) -> Result<(), ValidationError> {
     let Some(reg) = NodeView::property(node, "reg") else {
         return Ok(());
@@ -277,35 +287,7 @@ fn extract_memory<N: NodeView>(
     for chunk in bytes.chunks_exact(16) {
         let r = parse_one_region(chunk);
         validate_region(r, pa_bits)?;
-        regions
-            .try_push(r)
-            .map_err(|_| ValidationError::TooManyMemoryRegions)?;
-    }
-    Ok(())
-}
-
-/// Extract `reg` pairs from a device node (`/intc`, `/syscon`,
-/// `/pci`) into `devices` for the §4.4 check 2 overlap test.
-/// The host can place `/memory@*` overlapping any of these device
-/// bases, which IS adversarial; the extraction itself is base-only.
-fn extract_device_regs<N: NodeView>(
-    node: &N,
-    devices: &mut ArrayVec<Region, MAX_DEVICE_RANGES>,
-    pa_bits: u32,
-) -> Result<(), ValidationError> {
-    let Some(reg) = NodeView::property(node, "reg") else {
-        return Ok(());
-    };
-    let bytes = reg.as_ref();
-    if !bytes.len().is_multiple_of(16) {
-        return Err(ValidationError::BadPropertyShape);
-    }
-    for chunk in bytes.chunks_exact(16) {
-        let r = parse_one_region(chunk);
-        validate_region(r, pa_bits)?;
-        devices
-            .try_push(r)
-            .map_err(|_| ValidationError::TooManyDeviceRanges)?;
+        regions.try_push(r).map_err(|_| overflow_err)?;
     }
     Ok(())
 }
@@ -375,12 +357,11 @@ fn regions_overlap(a: Region, b: Region) -> bool {
 /// chunking, so this function is total.
 fn parse_one_region(chunk: &[u8]) -> Region {
     debug_assert_eq!(chunk.len(), 16);
-    let gpa = u64::from_be_bytes([
-        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-    ]);
-    let size = u64::from_be_bytes([
-        chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14], chunk[15],
-    ]);
+    // `chunks_exact(16)` guarantees exactly 16 bytes, so both
+    // `try_into` calls are infallible. `unwrap_or_default` keeps
+    // the function total without pulling in `unwrap`.
+    let gpa = u64::from_be_bytes(chunk[..8].try_into().unwrap_or_default());
+    let size = u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default());
     Region { gpa, size }
 }
 

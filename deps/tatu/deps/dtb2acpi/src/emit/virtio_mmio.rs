@@ -14,7 +14,7 @@
 //! Empty slots (no device attached by the VMM) are harmless: the driver reads
 //! the virtio magic at probe time and skips a slot that has none.
 
-use devtree::{NodeView, PropertyView, TreeView};
+use devtree::{NodeView, TreeView};
 
 use super::aml;
 use crate::dtb::DtbNode;
@@ -24,16 +24,13 @@ use crate::error::{DtbError, Site};
 /// `_HID` (string-valued name, "LNRO0005" = 8 chars) + `_UID` (Byte-valued).
 const FIXED_NAMES_BYTES: usize = (1 + 4 + aml::string_bytes(8)) + (1 + 4 + 1 + 1);
 
-/// `_CRS` wrapper bytes: `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descs>))`.
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
-
 /// QWordMemory(window) + ExtendedInterrupt(GSI) + EndTag.
 const CRS_DESCRIPTOR_BYTES: usize =
     aml::QWORD_MEMORY_BYTES + aml::EXTENDED_INTERRUPT_BYTES + aml::END_TAG_BYTES;
 
 /// Total bytes for one virtio-mmio ACPI device.
 pub(crate) const DEVICE_BYTES: usize = {
-    let body = FIXED_NAMES_BYTES + CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
+    let body = FIXED_NAMES_BYTES + aml::CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
     // DeviceOp(2) + PkgLength(2) + NameSeg(4) + body
     2 + aml::PKG_LENGTH_BYTES + 4 + body
 };
@@ -85,55 +82,20 @@ fn write_one_device<N: NodeView + Copy>(
             site: Site::VirtioMmio,
             property: "reg",
         })?;
-    let (gsi, sense) = decode_gsi(node)?;
+    let (gsi, sense) = node.decode_interrupts_2(Site::VirtioMmio)?;
 
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    let pkg_value = DEVICE_BYTES.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let pos = aml::write_name_seg(slot, pos, &name_seg(index))?;
+    let pos = aml::write_device_header(slot, pos, &name_seg(index), DEVICE_BYTES)?;
 
     // LNRO0005 = the ACPI _HID Linux's virtio_mmio driver matches; MMIO because
     // _CRS exposes a QWordMemory resource (not an I/O-port one).
     let pos = aml::write_name_string(slot, pos, b"_HID", b"LNRO0005")?;
     let pos = aml::write_name_byte(slot, pos, b"_UID", index)?;
 
-    let buffer_size = u16::try_from(CRS_DESCRIPTOR_BYTES).map_err(|_| DtbError::Internal)?;
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES + 3 /* WordPrefix + u16 */ + CRS_DESCRIPTOR_BYTES;
-
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
+    let pos = aml::write_crs_buffer_header(slot, pos, CRS_DESCRIPTOR_BYTES)?;
 
     let pos = aml::write_qword_memory(slot, pos, base, size)?;
     let pos = aml::write_extended_interrupt(slot, pos, gsi, sense)?;
     aml::write_end_tag(slot, pos)
-}
-
-/// `interrupts = <pin, sense>` — the first cell is the IO-APIC pin (the GSI
-/// under identity routing), the second the trigger/polarity sense. Returns
-/// `(gsi, sense)` so the `_CRS` ExtendedInterrupt declares the right trigger.
-fn decode_gsi<N: NodeView + Copy>(node: &DtbNode<N>) -> Result<(u32, u32), DtbError> {
-    let prop = node
-        .node
-        .property("interrupts")
-        .ok_or(DtbError::MissingProperty {
-            site: Site::VirtioMmio,
-            property: "interrupts",
-        })?;
-    let mut cells = prop.as_u32s().ok_or(DtbError::MalformedProperty {
-        site: Site::VirtioMmio,
-        property: "interrupts",
-    })?;
-    let malformed = || DtbError::MalformedProperty {
-        site: Site::VirtioMmio,
-        property: "interrupts",
-    };
-    let gsi = cells.next().ok_or_else(malformed)?;
-    let sense = cells.next().ok_or_else(malformed)?;
-    Ok((gsi, sense))
 }
 
 /// `VMnn` NameSeg (two decimal digits); 16 mmio slots is the planner maximum.

@@ -18,13 +18,9 @@ use crate::error::{DtbError, Site};
 /// `_HID` + `_UID`.
 const FIXED_NAMES_BYTES: usize = (1 + 4 + 1 + 4) + (1 + 4 + 1 + 1);
 
-/// `_CRS` wrapper bytes around a QWordMemory descriptor and EndTag:
-/// `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descriptors>))`.
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
-
 const fn motherboard_aml_bytes() -> usize {
     let descriptors = aml::QWORD_MEMORY_BYTES + aml::END_TAG_BYTES;
-    let crs = CRS_WRAPPER_BYTES + descriptors;
+    let crs = aml::CRS_WRAPPER_BYTES + descriptors;
     let body = FIXED_NAMES_BYTES.saturating_add(crs);
     body.saturating_add(aml::PKG_LENGTH_BYTES).saturating_add(6)
 }
@@ -67,36 +63,15 @@ fn write_one_device(
 ) -> Result<usize, DtbError> {
     let total = motherboard_aml_bytes();
 
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    let pkg_value = total.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let name = motherboard_name_seg(index);
-    let pos = aml::write_name_seg(slot, pos, &name)?;
+    let pos = aml::write_device_header(slot, pos, &aml::name_seg_indexed(b"MBR", index), total)?;
 
     let pos = aml::write_name_dword(slot, pos, b"_HID", aml::eisaid(b"PNP0C02"))?;
     let pos = aml::write_name_byte(slot, pos, b"_UID", index)?;
 
     let descriptors_bytes = aml::QWORD_MEMORY_BYTES + aml::END_TAG_BYTES;
-    let buffer_size = u16::try_from(descriptors_bytes).map_err(|_| DtbError::Internal)?;
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES + 3 + descriptors_bytes;
-
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
+    let pos = aml::write_crs_buffer_header(slot, pos, descriptors_bytes)?;
     let pos = aml::write_qword_memory(slot, pos, base, size)?;
     aml::write_end_tag(slot, pos)
-}
-
-fn motherboard_name_seg(index: u8) -> [u8; 4] {
-    let d0 = if index < 10 {
-        b'0'.saturating_add(index)
-    } else {
-        b'A'.saturating_add(index.saturating_sub(10))
-    };
-    [b'M', b'B', b'R', d0]
 }
 
 #[cfg(test)]
@@ -110,8 +85,8 @@ mod tests {
 
     #[test]
     fn motherboard_name_first_few() {
-        assert_eq!(motherboard_name_seg(0), *b"MBR0");
-        assert_eq!(motherboard_name_seg(9), *b"MBR9");
-        assert_eq!(motherboard_name_seg(10), *b"MBRA");
+        assert_eq!(aml::name_seg_indexed(b"MBR", 0), *b"MBR0");
+        assert_eq!(aml::name_seg_indexed(b"MBR", 9), *b"MBR9");
+        assert_eq!(aml::name_seg_indexed(b"MBR", 10), *b"MBRA");
     }
 }
