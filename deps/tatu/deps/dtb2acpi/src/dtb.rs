@@ -155,6 +155,36 @@ impl<N: NodeView + Copy> DtbNode<N> {
         })
     }
 
+    /// Decode a 2-cell `interrupts` property: `<pin, sense>`. Returns
+    /// `(gsi, sense)`. Validates that exactly 2 cells are present.
+    ///
+    /// # Errors
+    /// `MissingProperty` if absent. `MalformedProperty` if not exactly
+    /// 2 u32 cells.
+    pub(crate) fn decode_interrupts_2(&self, site: Site) -> Result<(u32, u32), DtbError> {
+        let prop = self
+            .node
+            .property("interrupts")
+            .ok_or(DtbError::MissingProperty {
+                site,
+                property: "interrupts",
+            })?;
+        let mut cells = prop.as_u32s().ok_or(DtbError::MalformedProperty {
+            site,
+            property: "interrupts",
+        })?;
+        let malformed = || DtbError::MalformedProperty {
+            site,
+            property: "interrupts",
+        };
+        let gsi = cells.next().ok_or_else(malformed)?;
+        let sense = cells.next().ok_or_else(malformed)?;
+        if cells.next().is_some() {
+            return Err(malformed());
+        }
+        Ok((gsi, sense))
+    }
+
     /// Read a u32 property if present.
     ///
     /// # Errors
