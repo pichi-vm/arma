@@ -18,13 +18,9 @@ use crate::error::{DtbError, Site};
 /// `_HID` + `_UID`.
 const FIXED_NAMES_BYTES: usize = (1 + 4 + 1 + 4) + (1 + 4 + 1 + 1);
 
-/// `_CRS` wrapper bytes around a QWordMemory descriptor and EndTag:
-/// `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descriptors>))`.
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
-
 const fn motherboard_aml_bytes() -> usize {
     let descriptors = aml::QWORD_MEMORY_BYTES + aml::END_TAG_BYTES;
-    let crs = CRS_WRAPPER_BYTES + descriptors;
+    let crs = aml::CRS_WRAPPER_BYTES + descriptors;
     let body = FIXED_NAMES_BYTES.saturating_add(crs);
     body.saturating_add(aml::PKG_LENGTH_BYTES).saturating_add(6)
 }
@@ -77,15 +73,7 @@ fn write_one_device(
     let pos = aml::write_name_byte(slot, pos, b"_UID", index)?;
 
     let descriptors_bytes = aml::QWORD_MEMORY_BYTES + aml::END_TAG_BYTES;
-    let buffer_size = u16::try_from(descriptors_bytes).map_err(|_| DtbError::Internal)?;
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES + 3 + descriptors_bytes;
-
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
+    let pos = aml::write_crs_buffer_header(slot, pos, descriptors_bytes)?;
     let pos = aml::write_qword_memory(slot, pos, base, size)?;
     aml::write_end_tag(slot, pos)
 }

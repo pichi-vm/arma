@@ -19,10 +19,6 @@ use crate::error::DtbError;
 /// `_HID` (string-valued name) + `_UID` (Byte-valued name).
 const FIXED_NAMES_BYTES: usize = (1 + 4 + aml::string_bytes(8)) + (1 + 4 + 1 + 1);
 
-/// `_CRS` wrapper bytes around the resource descriptors:
-/// `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descriptors>))`.
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
-
 /// QWordMemory(serial MMIO) + ExtendedInterrupt(GSI) + EndTag.
 const CRS_DESCRIPTOR_BYTES: usize =
     aml::QWORD_MEMORY_BYTES + aml::EXTENDED_INTERRUPT_BYTES + aml::END_TAG_BYTES;
@@ -40,7 +36,7 @@ const DSD_BYTES: usize = 1 + 4 + DSD_PACKAGE_BYTES;
 
 /// Total bytes occupied by the serial ACPI device when present.
 pub(crate) const DEVICE_BYTES: usize = {
-    let crs = CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
+    let crs = aml::CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
     let body = FIXED_NAMES_BYTES + crs + DSD_BYTES;
     // DeviceOp(2) + PkgLength(2) + NameSeg(4) + body
     2 + aml::PKG_LENGTH_BYTES + 4 + body
@@ -100,15 +96,7 @@ fn write_device<N: NodeView + Copy>(
     let pos = aml::write_name_string(slot, pos, b"_HID", b"RSCV0003")?;
     let pos = aml::write_name_byte(slot, pos, b"_UID", 0)?;
 
-    let buffer_size = u16::try_from(CRS_DESCRIPTOR_BYTES).map_err(|_| DtbError::Internal)?;
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES + 3 /* WordPrefix + u16 */ + CRS_DESCRIPTOR_BYTES;
-
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
+    let pos = aml::write_crs_buffer_header(slot, pos, CRS_DESCRIPTOR_BYTES)?;
 
     // interrupts = <pin sense>; the trigger lives in the second cell.
     let int_prop = node.node.property("interrupts").ok_or(DtbError::Internal)?;

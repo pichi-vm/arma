@@ -24,16 +24,13 @@ use crate::error::{DtbError, Site};
 /// `_HID` (string-valued name, "LNRO0005" = 8 chars) + `_UID` (Byte-valued).
 const FIXED_NAMES_BYTES: usize = (1 + 4 + aml::string_bytes(8)) + (1 + 4 + 1 + 1);
 
-/// `_CRS` wrapper bytes: `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descs>))`.
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
-
 /// QWordMemory(window) + ExtendedInterrupt(GSI) + EndTag.
 const CRS_DESCRIPTOR_BYTES: usize =
     aml::QWORD_MEMORY_BYTES + aml::EXTENDED_INTERRUPT_BYTES + aml::END_TAG_BYTES;
 
 /// Total bytes for one virtio-mmio ACPI device.
 pub(crate) const DEVICE_BYTES: usize = {
-    let body = FIXED_NAMES_BYTES + CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
+    let body = FIXED_NAMES_BYTES + aml::CRS_WRAPPER_BYTES + CRS_DESCRIPTOR_BYTES;
     // DeviceOp(2) + PkgLength(2) + NameSeg(4) + body
     2 + aml::PKG_LENGTH_BYTES + 4 + body
 };
@@ -97,15 +94,7 @@ fn write_one_device<N: NodeView + Copy>(
     let pos = aml::write_name_string(slot, pos, b"_HID", b"LNRO0005")?;
     let pos = aml::write_name_byte(slot, pos, b"_UID", index)?;
 
-    let buffer_size = u16::try_from(CRS_DESCRIPTOR_BYTES).map_err(|_| DtbError::Internal)?;
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES + 3 /* WordPrefix + u16 */ + CRS_DESCRIPTOR_BYTES;
-
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
+    let pos = aml::write_crs_buffer_header(slot, pos, CRS_DESCRIPTOR_BYTES)?;
 
     let pos = aml::write_qword_memory(slot, pos, base, size)?;
     let pos = aml::write_extended_interrupt(slot, pos, gsi, sense)?;

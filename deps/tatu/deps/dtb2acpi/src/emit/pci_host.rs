@@ -53,12 +53,6 @@ use crate::error::DtbError;
 const FIXED_NAMES_BYTES: usize = (1 + 4 + 1 + 4) * 2  // _HID, _CID
     + (1 + 4 + 1 + 1) * 3; // _SEG, _UID, _BBN
 
-/// `_CRS` wrapper bytes around the resource descriptors:
-/// `Name(_CRS, Buffer(PkgLength, WordPrefix+u16, <descriptors>))`
-/// = NameOp(1) + "_CRS"(4) + BufferOp(1) + PkgLength(2)
-///   + WordPrefix+u16(3).
-const CRS_WRAPPER_BYTES: usize = 1 + 4 + 1 + aml::PKG_LENGTH_BYTES + 3;
-
 /// Memory-window counts a host bridge advertises in `_CRS`, split by
 /// descriptor width: 32-bit (`DWordMemory`) and 64-bit (`QWordMemory`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -74,7 +68,7 @@ const fn host_bridge_aml_bytes(w: MemWindows) -> usize {
         .saturating_add(aml::DWORD_MEMORY_BYTES.saturating_mul(w.mem32))
         .saturating_add(aml::QWORD_MEMORY_BYTES.saturating_mul(w.mem64))
         .saturating_add(aml::END_TAG_BYTES);
-    let crs = CRS_WRAPPER_BYTES.saturating_add(descriptors);
+    let crs = aml::CRS_WRAPPER_BYTES.saturating_add(descriptors);
     let body = FIXED_NAMES_BYTES.saturating_add(crs);
     // DeviceOp(2) + PkgLength(2) + NameSeg(4) + body
     body.saturating_add(aml::PKG_LENGTH_BYTES).saturating_add(6)
@@ -163,19 +157,7 @@ fn write_one_device<N: devtree::NodeView + Copy>(
         .and_then(|v| v.checked_add(aml::QWORD_MEMORY_BYTES.checked_mul(windows.mem64)?))
         .and_then(|v| v.checked_add(aml::END_TAG_BYTES))
         .ok_or(DtbError::Internal)?;
-    let buffer_size = u16::try_from(descriptors_bytes).map_err(|_| DtbError::Internal)?;
-    // WordPrefix + u16 = 3 bytes of buffer-size header before descriptors.
-    let buf_pkg_value = aml::PKG_LENGTH_BYTES
-        .checked_add(3)
-        .and_then(|v| v.checked_add(descriptors_bytes))
-        .ok_or(DtbError::Internal)?;
-
-    let pos = aml::write_bytes(slot, pos, &[aml::NAME_OP])?;
-    let pos = aml::write_name_seg(slot, pos, b"_CRS")?;
-    let pos = aml::write_bytes(slot, pos, &[aml::BUFFER_OP])?;
-    let pos = aml::write_pkg_length(slot, pos, buf_pkg_value)?;
-    let pos = aml::write_bytes(slot, pos, &[aml::WORD_PREFIX])?;
-    let pos = aml::write_bytes(slot, pos, &buffer_size.to_le_bytes())?;
+    let pos = aml::write_crs_buffer_header(slot, pos, descriptors_bytes)?;
 
     // ─── Resource descriptors ──────────────────────────────────────
     let pos = aml::write_word_bus_number(slot, pos, bus_start, bus_end)?;
