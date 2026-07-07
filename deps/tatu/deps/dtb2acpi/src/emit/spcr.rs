@@ -336,34 +336,7 @@ pub(crate) fn decode_serial<N: NodeView + Copy>(
         }
     };
 
-    // `interrupts = <pin, sense>` (2-cell IO-APIC binding). The first
-    // cell is the IO-APIC pin; the second is the sense, which ACPI's
-    // SPCR has no field for under a single identity-routed IOAPIC.
-    let int_prop = node
-        .node
-        .property("interrupts")
-        .ok_or(DtbError::MissingProperty {
-            site: Site::Serial,
-            property: "interrupts",
-        })?;
-    let mut cells = int_prop.as_u32s().ok_or(DtbError::MalformedProperty {
-        site: Site::Serial,
-        property: "interrupts",
-    })?;
-    let pin = cells.next().ok_or(DtbError::MalformedProperty {
-        site: Site::Serial,
-        property: "interrupts",
-    })?;
-    let _sense = cells.next().ok_or(DtbError::MalformedProperty {
-        site: Site::Serial,
-        property: "interrupts",
-    })?;
-    if cells.next().is_some() {
-        return Err(DtbError::MalformedProperty {
-            site: Site::Serial,
-            property: "interrupts",
-        });
-    }
+    let (pin, _sense) = node.decode_interrupts_2(Site::Serial)?;
 
     Ok((base, access_size, pin))
 }
