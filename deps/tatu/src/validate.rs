@@ -357,12 +357,11 @@ fn regions_overlap(a: Region, b: Region) -> bool {
 /// chunking, so this function is total.
 fn parse_one_region(chunk: &[u8]) -> Region {
     debug_assert_eq!(chunk.len(), 16);
-    let gpa = u64::from_be_bytes([
-        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-    ]);
-    let size = u64::from_be_bytes([
-        chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14], chunk[15],
-    ]);
+    // `chunks_exact(16)` guarantees exactly 16 bytes, so both
+    // `try_into` calls are infallible. `unwrap_or_default` keeps
+    // the function total without pulling in `unwrap`.
+    let gpa = u64::from_be_bytes(chunk[..8].try_into().unwrap_or_default());
+    let size = u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default());
     Region { gpa, size }
 }
 
