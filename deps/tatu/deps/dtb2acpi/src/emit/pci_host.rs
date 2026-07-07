@@ -137,7 +137,7 @@ fn write_one_device<N: devtree::NodeView + Copy>(
     // PkgLength encodes (PkgLength + NameSeg + body) = total - DeviceOp.
     let pkg_value = total.checked_sub(2).ok_or(DtbError::Internal)?;
     let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let name = pci_name_seg(segment);
+    let name = aml::name_seg_indexed(b"PCI", segment);
     let pos = aml::write_name_seg(slot, pos, &name)?;
 
     // ─── Body ──────────────────────────────────────────────────────
@@ -180,27 +180,15 @@ fn write_one_device<N: devtree::NodeView + Copy>(
     aml::write_end_tag(slot, cursor)
 }
 
-/// Render `"PCI<seg>"` as a 4-byte NameSeg (e.g. `PCI0`, `PCI1`). For
-/// segment ≥ 10 the trailing char is a hex letter; NameSegs permit
-/// A-Z/0-9/_ after the first character.
-fn pci_name_seg(seg: u8) -> [u8; 4] {
-    let d0 = if seg < 10 {
-        b'0'.saturating_add(seg)
-    } else {
-        b'A'.saturating_add(seg.saturating_sub(10))
-    };
-    [b'P', b'C', b'I', d0]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn pci_name_seg_first_few() {
-        assert_eq!(pci_name_seg(0), *b"PCI0");
-        assert_eq!(pci_name_seg(9), *b"PCI9");
-        assert_eq!(pci_name_seg(10), *b"PCIA");
+        assert_eq!(aml::name_seg_indexed(b"PCI", 0), *b"PCI0");
+        assert_eq!(aml::name_seg_indexed(b"PCI", 9), *b"PCI9");
+        assert_eq!(aml::name_seg_indexed(b"PCI", 10), *b"PCIA");
     }
 
     #[test]
