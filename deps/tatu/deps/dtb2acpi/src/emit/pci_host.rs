@@ -132,13 +132,7 @@ fn write_one_device<N: devtree::NodeView + Copy>(
     let windows = count_windows(node)?;
     let total = host_bridge_aml_bytes(windows);
 
-    // DeviceOp: 5B 82
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    // PkgLength encodes (PkgLength + NameSeg + body) = total - DeviceOp.
-    let pkg_value = total.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let name = aml::name_seg_indexed(b"PCI", segment);
-    let pos = aml::write_name_seg(slot, pos, &name)?;
+    let pos = aml::write_device_header(slot, pos, &aml::name_seg_indexed(b"PCI", segment), total)?;
 
     // ─── Body ──────────────────────────────────────────────────────
     let pos = aml::write_name_dword(slot, pos, b"_HID", aml::eisaid(b"PNP0A08"))?;

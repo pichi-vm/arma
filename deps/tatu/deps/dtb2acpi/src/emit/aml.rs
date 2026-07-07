@@ -91,6 +91,22 @@ pub(crate) fn write_name_seg(
     write_bytes(slot, pos, name)
 }
 
+/// Write the AML `Device(<name>)` header: ExtOpPrefix + DeviceOp +
+/// 2-byte PkgLength + 4-byte NameSeg. `total_bytes` is the complete
+/// device size (including the 2-byte DeviceOp prefix); the PkgLength
+/// covers everything after the prefix.
+pub(crate) fn write_device_header(
+    slot: &mut [u8],
+    pos: usize,
+    name: &[u8; 4],
+    total_bytes: usize,
+) -> Result<usize, DtbError> {
+    let pos = write_bytes(slot, pos, &[EXT_OP_PREFIX, DEVICE_OP])?;
+    let pkg_value = total_bytes.checked_sub(2).ok_or(DtbError::Internal)?;
+    let pos = write_pkg_length(slot, pos, pkg_value)?;
+    write_name_seg(slot, pos, name)
+}
+
 /// Build a NameSeg from a 3-byte prefix and a hex index (`0`–`9`,
 /// `A`–`Z`): e.g. `name_seg_indexed(b"PCI", 0)` → `b"PCI0"`,
 /// `name_seg_indexed(b"MBR", 10)` → `b"MBRA"`.

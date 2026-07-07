@@ -84,10 +84,7 @@ fn write_one_device<N: NodeView + Copy>(
         })?;
     let (gsi, sense) = node.decode_interrupts_2(Site::VirtioMmio)?;
 
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    let pkg_value = DEVICE_BYTES.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let pos = aml::write_name_seg(slot, pos, &name_seg(index))?;
+    let pos = aml::write_device_header(slot, pos, &name_seg(index), DEVICE_BYTES)?;
 
     // LNRO0005 = the ACPI _HID Linux's virtio_mmio driver matches; MMIO because
     // _CRS exposes a QWordMemory resource (not an I/O-port one).

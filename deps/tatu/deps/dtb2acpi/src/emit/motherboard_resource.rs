@@ -63,11 +63,7 @@ fn write_one_device(
 ) -> Result<usize, DtbError> {
     let total = motherboard_aml_bytes();
 
-    let pos = aml::write_bytes(slot, pos, &[aml::EXT_OP_PREFIX, aml::DEVICE_OP])?;
-    let pkg_value = total.checked_sub(2).ok_or(DtbError::Internal)?;
-    let pos = aml::write_pkg_length(slot, pos, pkg_value)?;
-    let name = aml::name_seg_indexed(b"MBR", index);
-    let pos = aml::write_name_seg(slot, pos, &name)?;
+    let pos = aml::write_device_header(slot, pos, &aml::name_seg_indexed(b"MBR", index), total)?;
 
     let pos = aml::write_name_dword(slot, pos, b"_HID", aml::eisaid(b"PNP0C02"))?;
     let pos = aml::write_name_byte(slot, pos, b"_UID", index)?;
