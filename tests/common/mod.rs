@@ -99,3 +99,68 @@ pub(crate) fn find_pmi_vm(bytes: &[u8]) -> (usize, usize) {
     }
     panic!("no .pmi.vm section found");
 }
+
+/// Build a PMI selecting a base-DTB channel mode via `--dtb`: `None` for the
+/// optional default, `Some("attached")`, or `Some(<path>)` for detached.
+#[allow(dead_code)]
+pub(crate) fn build_pmi_dtb(kernel: &Path, config: &Path, out: &Path, dtb: Option<&str>) {
+    let mut cmd = Command::new(arma_bin());
+    cmd.arg("build")
+        .arg("--kernel")
+        .arg(kernel)
+        .arg("--config")
+        .arg(config)
+        .arg("--cmdline")
+        .arg("console=ttyS0")
+        .arg("--profile")
+        .arg("x86-64-v3");
+    if let Some(d) = dtb {
+        cmd.arg("--dtb").arg(d);
+    }
+    cmd.arg(out);
+    let st = cmd.status().expect("spawn arma");
+    assert!(st.success(), "arma build failed: {st:?}");
+}
+
+/// Size of a named PE section's raw data, or `None` if the section is absent.
+#[allow(dead_code)]
+pub(crate) fn section_raw_size(bytes: &[u8], name: &str) -> Option<u32> {
+    let pe = goblin::pe::PE::parse(bytes).expect("parse PE");
+    pe.sections
+        .iter()
+        .find(|s| s.name().unwrap_or("").trim_end_matches('\0') == name)
+        .map(|s| s.size_of_raw_data)
+}
+
+/// The section name held by the `.pmi.vm` `dt:dtb` attribute, or `None` when the
+/// image is detached (no attribute).
+#[allow(dead_code)]
+pub(crate) fn dt_dtb_attribute(bytes: &[u8]) -> Option<String> {
+    use ciborium::value::Value;
+    let (off, len) = find_pmi_vm(bytes);
+    let value: Value = ciborium::from_reader(&bytes[off..off + len]).expect("decode .pmi.vm");
+    let Value::Map(entries) = value else {
+        panic!(".pmi.vm is not a CBOR map");
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (Value::Text(t), Value::Text(n)) if t == "dt:dtb" => Some(n.clone()),
+        _ => None,
+    })
+}
+
+/// Extract the bundled base DTB bytes from a PMI by following the `dt:dtb`
+/// attribute (`.tatu.dtb` attached / `.dtb` optional). Panics for a detached
+/// image, which carries no bundled base.
+#[allow(dead_code)]
+pub(crate) fn base_dtb(bytes: &[u8]) -> Vec<u8> {
+    let name = dt_dtb_attribute(bytes).expect("dt:dtb attribute present (not detached)");
+    let pe = goblin::pe::PE::parse(bytes).expect("parse PE");
+    let sec = pe
+        .sections
+        .iter()
+        .find(|s| s.name().unwrap_or("").trim_end_matches('\0') == name)
+        .unwrap_or_else(|| panic!("base section `{name}` present"));
+    let off = sec.pointer_to_raw_data as usize;
+    let len = sec.virtual_size as usize;
+    bytes[off..off + len].to_vec()
+}

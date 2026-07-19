@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use ciborium::value::Value;
 use devtree::{NodeView, Tree, TreeView};
 
 const MIB: u64 = 1024 * 1024;
@@ -36,18 +37,11 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
     let pe = goblin::pe::PE::parse(&bytes).context("parse PMI as PE")?;
 
     let mut regions: Vec<Region> = Vec::new();
-    let mut dtb: Option<&[u8]> = None;
     for s in &pe.sections {
         let name = s.name().unwrap_or("?").trim_end_matches('\0').to_string();
-        // The base DTB is a tatu-namespaced section (`.tatu.dtb`); arma fills it
-        // at build time and dillo loads it into guest memory.
-        if name == ".tatu.dtb" {
-            let off = s.pointer_to_raw_data as usize;
-            let len = s.size_of_raw_data as usize;
-            dtb = bytes.get(off..off + len);
-        }
         // Loaded payload sections carry a nonzero GPA (virtual_address); the
-        // non-loaded `.pmi.vm` manifest is at 0 and excluded.
+        // non-loaded `.pmi.vm` manifest and the bundled-fallback base sit at 0
+        // and are excluded.
         let gpa = u64::from(s.virtual_address);
         if gpa > 0 {
             regions.push(Region {
@@ -58,66 +52,23 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
             });
         }
     }
-    let dtb = dtb.context(".tatu.dtb section not found in PMI")?;
-    let tree: Tree<'_> = Tree::parse(dtb).context("parse base DTB")?;
-    let root = tree.root();
 
-    // Device MMIO regions: every node's `reg` pairs (GIC dist+redist, v2m,
-    // serial, virtio-mmio×N, ECAM). The 64-bit BAR window comes from the PCIe
-    // `ranges`, not a `reg`, and is added separately below.
-    let mut window: Option<(u64, u64)> = None;
-    for child in root.children() {
-        let cname = child.name().to_string();
-        if let Some(reg) = child.property("reg") {
-            let cells = be_cells(reg.as_ref());
-            for (i, chunk) in cells.as_chunks::<4>().0.iter().enumerate() {
-                let base = (u64::from(chunk[0]) << 32) | u64::from(chunk[1]);
-                let size = (u64::from(chunk[2]) << 32) | u64::from(chunk[3]);
-                if size == 0 {
-                    continue;
-                }
-                regions.push(Region {
-                    name: if i == 0 {
-                        cname.clone()
-                    } else {
-                        format!("{cname}#{i}")
-                    },
-                    base,
-                    size,
-                    kind: Kind::Device,
-                });
-            }
-        }
-        // PCIe bridge: the 64-bit window from `ranges` (7-cell tuple; cpu base =
-        // cells[3..5], size = cells[5..7]).
-        if let Some(ranges) = child.property("ranges") {
-            let c = be_cells(ranges.as_ref());
-            if c.len() >= 7 {
-                let base = (u64::from(c[3]) << 32) | u64::from(c[4]);
-                let size = (u64::from(c[5]) << 32) | u64::from(c[6]);
-                if size > 0 {
-                    window = Some((base, size));
-                }
-            }
-        }
-    }
-
-    if let Some((wb, ws)) = window {
-        regions.push(Region {
-            name: "pcie-bar-window".into(),
-            base: wb,
-            size: ws,
-            kind: Kind::Window,
-        });
-        regions.push(Region {
-            name: "(burned buddy)".into(),
-            base: wb + ws,
-            size: ws,
-            kind: Kind::Burned,
-        });
+    // Locate the bundled base DTB through the `dt:dtb` attribute in `.pmi.vm`
+    // (`.tatu.dtb` in attached mode, `.dtb` in optional). A detached image
+    // carries no attribute and no bundled base, so its device regions cannot be
+    // shown here.
+    match base_dtb_bytes(&bytes, &pe)? {
+        Some(dtb) => regions.extend(base_device_regions(dtb)?),
+        None => println!("(base DTB is detached; device regions omitted)"),
     }
 
     regions.sort_by_key(|r| r.base);
+
+    // The PCIe BAR window (if any) drives the window/space invariant checks.
+    let window: Option<(u64, u64)> = regions
+        .iter()
+        .find(|r| r.kind == Kind::Window)
+        .map(|r| (r.base, r.size));
 
     // ---- render ----
     println!("arma check: {}", pmi_path.display());
@@ -243,6 +194,108 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
         }
         bail!("{} layout problem(s) found", problems.len())
     }
+}
+
+/// Device MMIO and PCIe-window regions declared by the base DTB.
+fn base_device_regions(dtb: &[u8]) -> Result<Vec<Region>> {
+    let tree: Tree<'_> = Tree::parse(dtb).context("parse base DTB")?;
+    let root = tree.root();
+    let mut regions: Vec<Region> = Vec::new();
+
+    // Device MMIO regions: every node's `reg` pairs (GIC dist+redist, v2m,
+    // serial, virtio-mmio×N, ECAM). The 64-bit BAR window comes from the PCIe
+    // `ranges`, not a `reg`, and is added separately below.
+    let mut window: Option<(u64, u64)> = None;
+    for child in root.children() {
+        let cname = child.name().to_string();
+        if let Some(reg) = child.property("reg") {
+            let cells = be_cells(reg.as_ref());
+            for (i, chunk) in cells.as_chunks::<4>().0.iter().enumerate() {
+                let base = (u64::from(chunk[0]) << 32) | u64::from(chunk[1]);
+                let size = (u64::from(chunk[2]) << 32) | u64::from(chunk[3]);
+                if size == 0 {
+                    continue;
+                }
+                regions.push(Region {
+                    name: if i == 0 {
+                        cname.clone()
+                    } else {
+                        format!("{cname}#{i}")
+                    },
+                    base,
+                    size,
+                    kind: Kind::Device,
+                });
+            }
+        }
+        // PCIe bridge: the 64-bit window from `ranges` (7-cell tuple; cpu base =
+        // cells[3..5], size = cells[5..7]).
+        if let Some(ranges) = child.property("ranges") {
+            let c = be_cells(ranges.as_ref());
+            if c.len() >= 7 {
+                let base = (u64::from(c[3]) << 32) | u64::from(c[4]);
+                let size = (u64::from(c[5]) << 32) | u64::from(c[6]);
+                if size > 0 {
+                    window = Some((base, size));
+                }
+            }
+        }
+    }
+
+    if let Some((wb, ws)) = window {
+        regions.push(Region {
+            name: "pcie-bar-window".into(),
+            base: wb,
+            size: ws,
+            kind: Kind::Window,
+        });
+        regions.push(Region {
+            name: "(burned buddy)".into(),
+            base: wb + ws,
+            size: ws,
+            kind: Kind::Burned,
+        });
+    }
+
+    Ok(regions)
+}
+
+/// The bundled base DTB named by the `.pmi.vm` `dt:dtb` attribute, or `None` for
+/// a detached image (no attribute, no bundled base).
+fn base_dtb_bytes<'b>(bytes: &'b [u8], pe: &goblin::pe::PE<'_>) -> Result<Option<&'b [u8]>> {
+    let Some(section) = dt_dtb_attribute(bytes, pe)? else {
+        return Ok(None);
+    };
+    let raw = section_raw(bytes, pe, &section)
+        .with_context(|| format!("dt:dtb names section `{section}`, absent from the PMI"))?;
+    Ok(Some(raw))
+}
+
+/// The `dt:dtb` attribute (a PE section name) from the `.pmi.vm` CBOR manifest.
+fn dt_dtb_attribute(bytes: &[u8], pe: &goblin::pe::PE<'_>) -> Result<Option<String>> {
+    let cbor = section_raw(bytes, pe, ".pmi.vm").context(".pmi.vm section absent from the PMI")?;
+    let value: Value = ciborium::from_reader(cbor).context("decode .pmi.vm CBOR")?;
+    let Value::Map(entries) = value else {
+        bail!(".pmi.vm is not a CBOR map");
+    };
+    for (k, v) in &entries {
+        if matches!(k, Value::Text(t) if t == "dt:dtb") {
+            let name = v.as_text().context("dt:dtb attribute is not text")?;
+            return Ok(Some(name.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// Raw file bytes of the named PE section.
+fn section_raw<'b>(bytes: &'b [u8], pe: &goblin::pe::PE<'_>, name: &str) -> Option<&'b [u8]> {
+    let s = pe
+        .sections
+        .iter()
+        .find(|s| s.name().unwrap_or("").trim_end_matches('\0') == name)?;
+    let off = s.pointer_to_raw_data as usize;
+    let len = s.size_of_raw_data as usize;
+    bytes.get(off..off + len)
 }
 
 /// Parse a devicetree cell property (big-endian u32s) from its raw bytes.

@@ -121,13 +121,33 @@ struct BuildArgs {
     #[arg(long = "serial")]
     serial: bool,
 
+    /// Base-DTB channel mode (`dt` extension). Omit for optional mode (the
+    /// default): the base is bundled as a fallback and the VMM may substitute
+    /// an out-of-band base. Pass `attached` to bundle the base as the sole,
+    /// loaded copy. Pass any other value as a path: arma writes the generated
+    /// base DTB there for detached, out-of-band delivery and the PMI carries
+    /// no bundled base.
+    #[arg(long = "dtb", value_name = "attached|PATH")]
+    dtb: Option<String>,
+
     /// Output PMI path (positional).
     #[arg(value_name = "OUTPUT")]
     output: PathBuf,
 }
 
+/// Resolve `--dtb` into a channel mode and, for detached mode, the base-DTB
+/// output path. `attached` is the only sentinel; any other value is a path.
+fn resolve_dtb(dtb: Option<String>) -> (build::DtbMode, Option<PathBuf>) {
+    match dtb {
+        None => (build::DtbMode::Optional, None),
+        Some(v) if v == "attached" => (build::DtbMode::Attached, None),
+        Some(path) => (build::DtbMode::Detached, Some(PathBuf::from(path))),
+    }
+}
+
 impl From<BuildArgs> for build::BuildArgs {
     fn from(a: BuildArgs) -> Self {
+        let (dtb_mode, dtb_out) = resolve_dtb(a.dtb);
         build::BuildArgs {
             kernel_path: a.kernel,
             initrd_path: a.initrd,
@@ -140,6 +160,8 @@ impl From<BuildArgs> for build::BuildArgs {
             pci_slots: a.pci_slots,
             pci_window: a.pci_window,
             min_addr_space: a.min_addr_space,
+            dtb_mode,
+            dtb_out,
         }
     }
 }

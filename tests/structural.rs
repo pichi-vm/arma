@@ -280,8 +280,13 @@ fn manifest_correctness_x86() {
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
-    assert_eq!(spec.dt_dtb.as_deref(), Some(".tatu.dtb"));
-    // Last action must be Fill with merged:dtbo on .dtbo.
+    // Default build is optional mode: the `dt:dtb` attribute names the bundled
+    // fallback `.dtb`, and a `dt:dtb` fill delivers the base into `.tatu.dtb`.
+    assert_eq!(spec.dt_dtb.as_deref(), Some(".dtb"));
+    assert!(spec.actions.iter().any(|a| matches!(
+        a, Action::Fill(fl) if fl.section == ".tatu.dtb" && matches!(fl.kind, FillKind::DtDtb)
+    )));
+    // Last action must be Fill with dt:dtbo on .tatu.dtbo.
     match spec.actions.last() {
         Some(Action::Fill(fl)) => {
             assert_eq!(fl.section, ".tatu.dtbo");
@@ -304,7 +309,11 @@ fn manifest_correctness_aarch64() {
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
-    assert_eq!(spec.dt_dtb.as_deref(), Some(".tatu.dtb"));
+    // Default build is optional mode (see the x86 twin for the rationale).
+    assert_eq!(spec.dt_dtb.as_deref(), Some(".dtb"));
+    assert!(spec.actions.iter().any(|a| matches!(
+        a, Action::Fill(fl) if fl.section == ".tatu.dtb" && matches!(fl.kind, FillKind::DtDtb)
+    )));
     match spec.actions.last() {
         Some(Action::Fill(fl)) => {
             assert_eq!(fl.section, ".tatu.dtbo");
@@ -390,10 +399,21 @@ fn check_tatu_bootinfo_header(pmi_bytes: &[u8]) {
         );
         assert!(rs <= vs, "{name} Padded shape (raw ≤ virtual)");
     };
-    // .tatu.dtb is a tatu-reserved section arma fills with the base DTB:
-    // Padded shape (RawSize ≥ natural base DTB; VirtualSize = reservation).
+    // Default build is optional mode: `.tatu.dtb` is the `dt:dtb` fill target,
+    // a Zero section (RawSize = 0, VirtualSize = the reservation that must fit
+    // the base), and the base rides in the bundled `.dtb` fallback below.
     let _ = check_data_shape;
-    check_padded_shape(".tatu.dtb", base_dtb_gpa, base_dtb_size);
+    let (dva, dvs, drs) = look(".tatu.dtb").expect(".tatu.dtb present");
+    assert_eq!(dva, base_dtb_gpa, ".tatu.dtb VA");
+    assert_eq!(drs, 0, ".tatu.dtb is a Zero fill target");
+    assert!(
+        u64::from(base_dtb_size) <= u64::from(dvs),
+        "base fits the .tatu.dtb reservation"
+    );
+    // The bundled fallback carries the base bytes; it is non-loaded (VA = 0).
+    let (fva, _fvs, frs) = look(".dtb").expect(".dtb fallback present");
+    assert_eq!(fva, 0, ".dtb fallback is non-loaded");
+    assert!(base_dtb_size <= frs, ".dtb holds the base DTB");
     check_padded_shape(".linux", kernel_gpa, kernel_size);
     // .dtbo is Zero shape — RawSize = 0, VirtualSize = host_dtbo_size.
     let (va, vs, rs) = look(".tatu.dtbo").expect(".dtbo present");
@@ -484,16 +504,8 @@ fn base_dtb_parses_x86() {
         eprintln!("skip (kernel download failed)");
         return;
     };
-    let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
-    let dtb_sec = pe
-        .sections
-        .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.dtb")
-        .expect(".dtb present");
-    let off = dtb_sec.pointer_to_raw_data as usize;
-    let len = dtb_sec.virtual_size as usize;
-    let dtb = &f.pmi_bytes[off..off + len];
-    let _tree: devtree::Tree<'_> = devtree::Tree::parse(dtb).expect("base DTB parses");
+    let dtb = common::base_dtb(&f.pmi_bytes);
+    let _tree: devtree::Tree<'_> = devtree::Tree::parse(&dtb).expect("base DTB parses");
 }
 
 #[test]
@@ -503,16 +515,8 @@ fn base_dtb_parses_aarch64() {
         eprintln!("skip (kernel download failed)");
         return;
     };
-    let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
-    let dtb_sec = pe
-        .sections
-        .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.dtb")
-        .expect(".dtb present");
-    let off = dtb_sec.pointer_to_raw_data as usize;
-    let len = dtb_sec.virtual_size as usize;
-    let dtb = &f.pmi_bytes[off..off + len];
-    let _tree: devtree::Tree<'_> = devtree::Tree::parse(dtb).expect("base DTB parses");
+    let dtb = common::base_dtb(&f.pmi_bytes);
+    let _tree: devtree::Tree<'_> = devtree::Tree::parse(&dtb).expect("base DTB parses");
 }
 
 // ---------------------------------------------------------------------------

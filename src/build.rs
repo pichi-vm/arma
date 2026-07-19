@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::{base_dtb, bootinfo, initrd, kconfig, kernel, manifest, pe, planner, tatu};
 
+pub(crate) use crate::manifest::DtbMode;
+
 /// Resolve `(mmio_slots, pci_slots)` (device-model.md §6 Slot composition).
 /// With `--config`, infer/validate against kernel support; without it, honor
 /// explicit slots, else default to a PCI bridge (TODO C5: embedded IKCONFIG).
@@ -51,6 +53,11 @@ pub(crate) struct BuildArgs {
     /// defaults (C4b, device-model §6).
     pub(crate) pci_window: Option<u32>,
     pub(crate) min_addr_space: Option<u32>,
+    /// Base-DTB channel mode (`dt` extension); defaults to optional.
+    pub(crate) dtb_mode: manifest::DtbMode,
+    /// Detached-mode output path for the generated base DTB (`Some` only when
+    /// `dtb_mode` is [`manifest::DtbMode::Detached`]).
+    pub(crate) dtb_out: Option<PathBuf>,
 }
 
 pub(crate) fn run(args: &BuildArgs) -> Result<()> {
@@ -260,8 +267,14 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         initrd: lay.initrd.as_ref().map(|r| r.start),
         relocs: lay.relocs.as_ref().map(|r| r.start),
     };
-    let cbor = manifest::build_pmi_vm(arch, &tatu_img, action_gpas, &cpu_profile)
+    let cbor = manifest::build_pmi_vm(arch, &tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
         .context("build CBOR manifest")?;
+
+    // Detached mode: the base DTB is delivered out-of-band, so write the
+    // generated base to the caller's path instead of bundling it in the PMI.
+    if let (manifest::DtbMode::Detached, Some(path)) = (args.dtb_mode, args.dtb_out.as_ref()) {
+        atomic_write(path, &dtb_bytes)?;
+    }
 
     // ---- Step 11: assemble PE section list ----
     let sections = assemble_sections(
@@ -273,6 +286,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         &dtb_bytes,
         &lay,
         &cbor,
+        args.dtb_mode,
     );
 
     // ---- Step 12: emit PE; atomic write ----
@@ -371,26 +385,32 @@ fn assemble_sections<'a>(
     dtb_bytes: &'a [u8],
     lay: &planner::Layout,
     cbor: &'a [u8],
+    dtb_mode: manifest::DtbMode,
 ) -> Vec<pe::Section<'a>> {
     use std::borrow::Cow;
 
     let mut out: Vec<pe::Section<'a>> = Vec::with_capacity(16);
 
-    // Tatu sections in their ELF-resolved GPA order. arma overrides two
+    // Tatu sections in their ELF-resolved GPA order. arma overrides
     // tatu-defined zero sections with computed bytes: `.tatu.bootinfo`
-    // (the header) and `.tatu.dtb` (the measured base DTB). `.tatu.dtbo`
-    // stays a zero section — dillo fills it at launch (fill action in the
-    // manifest). arma synthesizes no `.dtb`/`.dtbo` of its own.
+    // (the header) always, and `.tatu.dtb` (the measured base DTB) only in
+    // attached mode — where the base is bundled and delivered by a `load`.
+    // In detached/optional mode `.tatu.dtb` is the `dt:dtb` fill target and
+    // stays a Zero section; the base is delivered out-of-band, and in
+    // optional mode a bundled fallback rides in `.dtb` (added below).
+    // `.tatu.dtbo` always stays a zero section — dillo fills it at launch.
+    let bundle_base = dtb_mode == manifest::DtbMode::Attached;
     for s in &tatu_img.sections {
         let data: Cow<'a, [u8]> = if s.is_bootinfo {
             // Tatu's section is 4 KiB virtual; arma fills the same 4 KiB
             // with header + zero pad.
             Cow::Borrowed(bootinfo_bytes)
-        } else if s.is_dtb {
+        } else if s.is_dtb && bundle_base {
             // Fill the reserved .tatu.dtb section with the base DTB; the
             // rest of the section stays zero (virtual_size > dtb len).
             Cow::Borrowed(dtb_bytes)
-        } else if s.is_nobits {
+        } else if s.is_dtb || s.is_nobits {
+            // Zero section: reserved range, no image bytes (a fill target).
             Cow::Borrowed(&[])
         } else {
             Cow::Borrowed(s.data.as_slice())
@@ -402,6 +422,23 @@ fn assemble_sections<'a>(
             data,
             characteristics: tatu_section_characteristics(&s.name, s.is_nobits),
             non_loaded: false,
+        });
+    }
+
+    // Optional mode: the bundled fallback base DTB. It is named by the
+    // `dt:dtb` attribute and read by the VMM only when it has no out-of-band
+    // base; it is placed nowhere in guest memory, so it rides as a non-loaded
+    // section (like `.pmi.vm`) with no GPA.
+    if dtb_mode == manifest::DtbMode::Optional {
+        out.push(pe::Section {
+            name: manifest::SECTION_DTB_FALLBACK.into(),
+            vaddr: 0,
+            virtual_size: dtb_bytes.len() as u64,
+            data: Cow::Borrowed(dtb_bytes),
+            characteristics: pe::IMAGE_SCN_CNT_INITIALIZED_DATA
+                | pe::IMAGE_SCN_MEM_READ
+                | pe::IMAGE_SCN_MEM_DISCARDABLE,
+            non_loaded: true,
         });
     }
 

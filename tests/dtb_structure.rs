@@ -19,16 +19,11 @@ use tempfile::TempDir;
 
 use common::{build_pmi, host_kernel};
 
+// The default build is optional mode, so the base DTB rides in the bundled
+// `.dtb` fallback named by the `dt:dtb` attribute (not the `.tatu.dtb` fill
+// target, which is a Zero section). Resolve it through the attribute.
 fn dtb_bytes_from(pmi_bytes: &[u8]) -> Vec<u8> {
-    let pe = goblin::pe::PE::parse(pmi_bytes).unwrap();
-    let dtb_sec = pe
-        .sections
-        .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.dtb")
-        .expect(".dtb present");
-    let off = dtb_sec.pointer_to_raw_data as usize;
-    let len = dtb_sec.virtual_size as usize;
-    pmi_bytes[off..off + len].to_vec()
+    common::base_dtb(pmi_bytes)
 }
 
 /// Build a PMI from the host's catalogued real kernel. Returns `None` when the
