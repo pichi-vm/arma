@@ -280,14 +280,14 @@ fn manifest_correctness_x86() {
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
-    assert_eq!(spec.merged_dtb.as_deref(), Some(".tatu.dtb"));
+    assert_eq!(spec.dt_dtb.as_deref(), Some(".tatu.dtb"));
     // Last action must be Fill with merged:dtbo on .dtbo.
     match spec.actions.last() {
         Some(Action::Fill(fl)) => {
             assert_eq!(fl.section, ".tatu.dtbo");
-            assert!(matches!(fl.kind, FillKind::MergedDtbo));
+            assert!(matches!(fl.kind, FillKind::DtDtbo));
         }
-        _ => panic!("last action must be merged:dtbo fill"),
+        _ => panic!("last action must be dt:dtbo fill"),
     }
     // .linux is loaded.
     assert!(spec.actions.iter().any(|a| matches!(
@@ -304,13 +304,13 @@ fn manifest_correctness_aarch64() {
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
-    assert_eq!(spec.merged_dtb.as_deref(), Some(".tatu.dtb"));
+    assert_eq!(spec.dt_dtb.as_deref(), Some(".tatu.dtb"));
     match spec.actions.last() {
         Some(Action::Fill(fl)) => {
             assert_eq!(fl.section, ".tatu.dtbo");
-            assert!(matches!(fl.kind, FillKind::MergedDtbo));
+            assert!(matches!(fl.kind, FillKind::DtDtbo));
         }
-        _ => panic!("last action must be merged:dtbo fill"),
+        _ => panic!("last action must be dt:dtbo fill"),
     }
     assert!(spec.actions.iter().any(|a| matches!(
         a, Action::Load(l) if l.section == ".linux"
@@ -529,7 +529,7 @@ fn vcpu_register_validity_x86() {
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     assert_eq!(spec.vcpu.rip, 0xFFFF_FFF0, "rip is the reset vector");
-    assert_eq!(spec.vcpu.rflags & 0x2, 0x2, "rflags bit 1 must be 1");
+    assert_eq!(spec.vcpu.rflags.get() & 0x2, 0x2, "rflags bit 1 must be 1");
     // gdtr.base equals the .tatu.gdt section's GPA.
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let gdt = pe
@@ -557,8 +557,8 @@ fn vcpu_register_validity_aarch64() {
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     // pstate.M[3:0] = 0x5 (EL1h); M[4] = 0 (AArch64).
-    assert_eq!(spec.vcpu.pstate & 0xF, 0x5);
-    assert_eq!((spec.vcpu.pstate >> 4) & 1, 0);
+    assert_eq!(spec.vcpu.pstate.get() & 0xF, 0x5);
+    assert_eq!((spec.vcpu.pstate.get() >> 4) & 1, 0);
     // pc lies inside .tatu.text.
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let text = pe

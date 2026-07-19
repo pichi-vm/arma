@@ -65,7 +65,7 @@ pub(crate) fn build_pmi_vm(
             encode(&spec)
         }
         Arch::Aarch64 => {
-            let spec = build_spec_aarch64(tatu, gpas, profile);
+            let spec = build_spec_aarch64(tatu, gpas, profile)?;
             encode(&spec)
         }
     }
@@ -132,13 +132,13 @@ fn build_actions(tatu: &TatuImage, gpas: ActionGpas) -> Vec<Action> {
         }));
     }
 
-    // Host-DTBO fill — the unmeasured half of the merged extension. Its fill
+    // Host-DTBO fill — the unmeasured half of the dt extension. Its fill
     // target is the tatu-defined `.tatu.dtbo` section, placed at its ELF vaddr.
     let dtbo_gpa = tatu.section(SECTION_DTBO).map_or(0, |s| s.vaddr);
     out.push(Action::Fill(Fill {
         gpa: dtbo_gpa,
         section: SECTION_DTBO.into(),
-        kind: pmi::vm::FillKind::MergedDtbo,
+        kind: pmi::vm::FillKind::DtDtbo,
     }));
 
     out
@@ -167,41 +167,43 @@ fn build_spec_x86(
     Ok(Spec {
         version: Version::default(),
         actions: build_actions(tatu, gpas),
-        vcpu: x86_vcpu(pgtable_gpa, gdt_gpa),
+        vcpu: x86_vcpu(pgtable_gpa, gdt_gpa)?,
         cpu_profile,
-        merged_dtb: Some(SECTION_DTB.into()),
+        dt_dtb: Some(SECTION_DTB.into()),
     })
 }
 
-fn x86_vcpu(pgtable_gpa: u64, gdt_gpa: u64) -> vcpu::x86_64::CpuState {
-    use vcpu::x86_64::{CpuState, Dtr, SegReg};
+fn x86_vcpu(pgtable_gpa: u64, gdt_gpa: u64) -> Result<vcpu::x86_64::CpuState> {
+    use vcpu::x86_64::{CpuState, Dtr, RFlags, SegAttributes, SegReg};
 
     // Code descriptor at selector 0x08 — must match tatu's
     // bootmem::gdt_page() (0x9B / 0xAF). Attributes
     // encode P=1, S=1, type=Code/RX, L=1, G=1.
-    let cs_attributes: u16 = 0xA09B; // L=1 (bit 9), P=1, type=11(code, R, A)
-    // Data descriptor at selector 0x10 — matches 0x93 / 0xCF.
-    let ds_attributes: u16 = 0xC093; // G=1, D/B=1, P=1, type=3(data, RW, A)
+    // vm.md segment-attribute encoding: type[0:3], S[4], DPL[5:6], P[7],
+    // AVL[8], L[9], D/B[10], G[11]; bits 12-15 reserved.
+    let cs_attributes: u16 = 0x0A9B; // P, S, type=0xB(code R,A), L(9), G(11)
+    // Data descriptor at selector 0x10.
+    let ds_attributes: u16 = 0x0C93; // P, S, type=0x3(data RW,A), D/B(10), G(11)
 
-    CpuState {
+    Ok(CpuState {
         rip: 0xFFFF_FFF0,
         rsp: 0,
-        rflags: 0x2,
+        rflags: RFlags::new(0x2)?,
         cr0: 0x8000_0001, // PG | PE
         cr3: pgtable_gpa,
         cr4: 0x20,   // PAE
         efer: 0x500, // LME | LMA
         cs: SegReg {
             selector: 0x08,
-            attributes: cs_attributes,
+            attributes: SegAttributes::new(cs_attributes)?,
             limit: 0xFFFF_FFFF,
             base: 0,
         },
-        ds: data_seg(0x10, ds_attributes),
-        es: data_seg(0x10, ds_attributes),
-        fs: data_seg(0x10, ds_attributes),
-        gs: data_seg(0x10, ds_attributes),
-        ss: data_seg(0x10, ds_attributes),
+        ds: data_seg(0x10, ds_attributes)?,
+        es: data_seg(0x10, ds_attributes)?,
+        fs: data_seg(0x10, ds_attributes)?,
+        gs: data_seg(0x10, ds_attributes)?,
+        ss: data_seg(0x10, ds_attributes)?,
         gdtr: Dtr {
             limit: 0x17, // 3 entries × 8 bytes - 1
             base: gdt_gpa,
@@ -222,16 +224,16 @@ fn x86_vcpu(pgtable_gpa: u64, gdt_gpa: u64) -> vcpu::x86_64::CpuState {
         r13: 0,
         r14: 0,
         r15: 0,
-    }
+    })
 }
 
-fn data_seg(selector: u16, attributes: u16) -> vcpu::x86_64::SegReg {
-    vcpu::x86_64::SegReg {
+fn data_seg(selector: u16, attributes: u16) -> Result<vcpu::x86_64::SegReg> {
+    Ok(vcpu::x86_64::SegReg {
         selector,
-        attributes,
+        attributes: vcpu::x86_64::SegAttributes::new(attributes)?,
         limit: 0xFFFF_FFFF,
         base: 0,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -242,30 +244,69 @@ fn build_spec_aarch64(
     tatu: &TatuImage,
     gpas: ActionGpas,
     cpu_profile: Profile,
-) -> Spec<vcpu::aarch64::CpuState> {
-    Spec {
+) -> Result<Spec<vcpu::aarch64::CpuState>> {
+    Ok(Spec {
         version: Version::default(),
         actions: build_actions(tatu, gpas),
-        vcpu: aarch64_vcpu(tatu.entry),
+        vcpu: aarch64_vcpu(tatu.entry)?,
         cpu_profile,
-        merged_dtb: Some(SECTION_DTB.into()),
-    }
+        dt_dtb: Some(SECTION_DTB.into()),
+    })
 }
 
-fn aarch64_vcpu(pc: u64) -> vcpu::aarch64::CpuState {
-    vcpu::aarch64::CpuState {
+fn aarch64_vcpu(pc: u64) -> Result<vcpu::aarch64::CpuState> {
+    use vcpu::aarch64::{CpuState, PState};
+
+    Ok(CpuState {
         pc,
-        pstate: 0x3C5,          // EL1h, DAIF masked
-        sctlr_el1: 0x00C5_0838, // typical reset; MMU off, caches off
+        pstate: PState::new(0x3C5)?, // EL1h, DAIF masked
+        sctlr_el1: 0x00C5_0838,      // typical reset; MMU off, caches off
+        // MMU is off at entry, so the translation/attribute registers are
+        // zero; tatu programs them itself.
+        tcr_el1: 0,
+        ttbr0_el1: 0,
+        ttbr1_el1: 0,
+        mair_el1: 0,
         vbar_el1: 0,
         // FPEN=0b11 (bits 21:20): enable FP/SIMD at EL1/EL0 from reset.
         // The bare-metal tatu (and compiler-emitted memcpy/SIMD) uses FP
         // registers; leaving CPACR_EL1=0 traps the first such access to the
         // (zero) EL1 vector. Boot with FP/SIMD enabled.
         cpacr_el1: 0x30_0000,
-        // sp_el1 = 0 (tatu's entry stub sets SP itself)
-        ..Default::default()
-    }
+        // sp_el1 = 0 (tatu's entry stub sets SP itself); all GPRs zeroed.
+        sp_el1: 0,
+        x0: 0,
+        x1: 0,
+        x2: 0,
+        x3: 0,
+        x4: 0,
+        x5: 0,
+        x6: 0,
+        x7: 0,
+        x8: 0,
+        x9: 0,
+        x10: 0,
+        x11: 0,
+        x12: 0,
+        x13: 0,
+        x14: 0,
+        x15: 0,
+        x16: 0,
+        x17: 0,
+        x18: 0,
+        x19: 0,
+        x20: 0,
+        x21: 0,
+        x22: 0,
+        x23: 0,
+        x24: 0,
+        x25: 0,
+        x26: 0,
+        x27: 0,
+        x28: 0,
+        x29: 0,
+        x30: 0,
+    })
 }
 
 // Quiet warnings about unused fields/imports — pmi's Default is enough.
@@ -302,13 +343,13 @@ mod tests {
         let gdt = tatu.section(SECTION_GDT).expect(".tatu.gdt in tatu ELF");
         assert_eq!(decoded.vcpu.cr3, pgt.vaddr);
         assert_eq!(decoded.vcpu.gdtr.base, gdt.vaddr);
-        assert!(matches!(decoded.merged_dtb, Some(s) if s == ".tatu.dtb"));
+        assert!(matches!(decoded.dt_dtb, Some(s) if s == ".tatu.dtb"));
         // Last action must be the fill for .dtbo.
         let last = decoded.actions.last().unwrap();
         match last {
             Action::Fill(f) => {
                 assert_eq!(f.section, SECTION_DTBO);
-                assert!(matches!(f.kind, pmi::vm::FillKind::MergedDtbo));
+                assert!(matches!(f.kind, pmi::vm::FillKind::DtDtbo));
             }
             Action::Load(_) => panic!("last action must be Fill"),
         }
@@ -328,8 +369,8 @@ mod tests {
         let decoded: Spec<vcpu::aarch64::CpuState> =
             from_reader(cbor.as_slice()).expect("strict round-trip decode");
         assert_eq!(decoded.vcpu.pc, tatu.entry);
-        assert_eq!(decoded.vcpu.pstate & 0xF, 0x5); // EL1h
-        assert_eq!((decoded.vcpu.pstate >> 4) & 1, 0); // AArch64
+        assert_eq!(decoded.vcpu.pstate.get() & 0xF, 0x5); // EL1h
+        assert_eq!((decoded.vcpu.pstate.get() >> 4) & 1, 0); // AArch64
     }
 
     #[test]
