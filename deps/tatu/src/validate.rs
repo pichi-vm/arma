@@ -4,7 +4,7 @@
 //! Devicetree validation.
 //!
 //! The host-supplied DTBO is adversarial: [`validate_host_dtbo`]
-//! enforces the merged-extension allowlist (per `pmi/spec/merged.md`
+//! enforces the merged-extension allowlist (per `pmi/spec/dt.md`
 //! §2) before merging.
 //!
 //! The merged tree (base + host DTBO) is then validated by
@@ -38,18 +38,22 @@ pub(crate) const MAX_DEVICE_RANGES: usize = 64;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum ValidationError {
-    // Host-DTBO allowlist (pmi/spec/merged.md §2).
+    // Host-DTBO allowlist (pmi/spec/dt.md, "Overlay contents").
     HostOverlayUnsupportedTarget,
     HostOverlayProhibitedPath,
     HostOverlayCpuPhandleProhibited,
     HostOverlayConflictingProperty,
     HostOverlayMemoryOverflow,
 
-    // §4.4 — semantic.
+    // Semantic (pmi/spec/dt.md, "Address validation").
     MemoryOverlapsDevice,
     NonCanonicalGpa,
     ZeroSize,
     AddressOverflow,
+
+    /// A `cpu@N` `cpu-release-addr` is not a safe write/release target: out of
+    /// range, over device MMIO, or outside declared guest RAM.
+    CpuReleaseAddrUnsafe,
 
     // §4.5 — maxima.
     TooManyCpus,
@@ -68,7 +72,7 @@ impl From<DtError> for ValidationError {
 }
 
 // ---------------------------------------------------------------------------
-// Host-DTBO allowlist (pmi/spec/merged.md §2).
+// Host-DTBO allowlist (pmi/spec/dt.md §2).
 // ---------------------------------------------------------------------------
 
 /// Enforce the merged-extension allowlist on the host-supplied DTBO
@@ -183,7 +187,7 @@ where
         if top_segment(child.name()) != "cpu" {
             return Err(ValidationError::HostOverlayProhibitedPath);
         }
-        // merged.md §2 cat 1: the host authors the cpu instances; their
+        // dt.md §2 cat 1: the host authors the cpu instances; their
         // `device_type` / `reg` / `status` / `enable-method` / `compatible`
         // are all allowed and DoS-bounded by count (in `validate_merged`),
         // not template-matched. Only `phandle` / `linux,phandle` are
@@ -244,7 +248,56 @@ pub(crate) fn validate_merged<T: TreeView>(tree: &T, pa_bits: u32) -> Result<(),
     }
 
     semantic_overlap_checks(&memory, &devices)?;
+    validate_cpu_release_addrs(tree, &memory, &devices, pa_bits)?;
     Ok(())
+}
+
+/// Validate every `cpu@N` `cpu-release-addr` in the merged tree.
+///
+/// A host-chosen release address is where the kernel writes a secondary vCPU's
+/// entry point and the secondary spins, so per pmi/spec/dt.md ("Address
+/// validation", safe write/release targets) the guest must confirm it is a sane
+/// RAM target before the kernel acts on it: in range, clear of device MMIO, and
+/// inside declared guest RAM. CPU identity and features are never taken from the
+/// overlay, so nothing else about `cpu@N` needs checking here.
+fn validate_cpu_release_addrs<T: TreeView>(
+    tree: &T,
+    memory: &[Region],
+    devices: &[Region],
+    pa_bits: u32,
+) -> Result<(), ValidationError> {
+    for child in tree.root().children() {
+        if top_segment(child.name()) != "cpus" {
+            continue;
+        }
+        for cpu in child.children() {
+            let Some(prop) = NodeView::property(&cpu, "cpu-release-addr") else {
+                continue;
+            };
+            let addr = parse_release_addr(prop.as_ref())?;
+            let target = Region { gpa: addr, size: 8 };
+            // In range (and no end-overflow).
+            validate_region(target, pa_bits)?;
+            // Clear of device MMIO.
+            if devices.iter().any(|d| regions_overlap(target, *d)) {
+                return Err(ValidationError::CpuReleaseAddrUnsafe);
+            }
+            // Inside a declared guest-RAM region.
+            if !memory.iter().any(|m| region_contains(*m, target)) {
+                return Err(ValidationError::CpuReleaseAddrUnsafe);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `cpu-release-addr` property (1 or 2 big-endian cells) to an address.
+fn parse_release_addr(bytes: &[u8]) -> Result<u64, ValidationError> {
+    match bytes.len() {
+        8 => Ok(u64::from_be_bytes(bytes.try_into().unwrap())),
+        4 => Ok(u64::from(u32::from_be_bytes(bytes.try_into().unwrap()))),
+        _ => Err(ValidationError::BadPropertyShape),
+    }
 }
 
 /// Count `/cpus/cpu@N` children for the [`MAX_CPUS`] DoS bound.
@@ -262,7 +315,7 @@ fn count_cpus<N: NodeView>(node: &N, count: &mut usize) -> Result<(), Validation
 /// Extract a `/memory@*` node's `reg` pairs into `regions`. Host
 /// can add memory nodes per §4.2, so validation here is adversarial
 /// (`reg` byte-shape and per-region overflow/canonical/nonzero per
-/// merged.md §2's "Address-bearing values" rule).
+/// dt.md §2's "Address-bearing values" rule).
 fn extract_memory<N: NodeView>(
     node: &N,
     regions: &mut ArrayVec<Region, MAX_MEMORY_REGIONS>,
@@ -346,7 +399,7 @@ impl Region {
 }
 
 /// Validate a region's invariants: nonzero size, no end-overflow, and that the
-/// region fits within the guest's physical address space. Per merged.md §2 the
+/// region fits within the guest's physical address space. Per dt.md §2 the
 /// overflow + bound checks are required on host-contributed addresses; the
 /// bound is the guest PA/IPA width (`pa_bits`), not a hardcoded constant (pmi
 /// spec bc7f581).
@@ -369,6 +422,14 @@ fn regions_overlap(a: Region, b: Region) -> bool {
         return true;
     };
     a.gpa < b_end && b.gpa < a_end
+}
+
+/// True when `inner` lies wholly within `outer`.
+fn region_contains(outer: Region, inner: Region) -> bool {
+    let (Some(outer_end), Some(inner_end)) = (outer.end(), inner.end()) else {
+        return false;
+    };
+    outer.gpa <= inner.gpa && inner_end <= outer_end
 }
 
 /// Parse one 16-byte `reg` chunk: a (u64 address, u64 size) pair
@@ -506,7 +567,74 @@ mod tests {
         validate_merged(&tree, TEST_PA_BITS).expect("basic fixture should pass");
     }
 
-    // ----- Host-DTBO allowlist tests (merged.md §2) ---------------------
+    // ----- cpu-release-addr safe write/release target (dt.md) -----------
+    //
+    // A merged tree with RAM at [0x4000_0000, 0x5000_0000), a device at
+    // [0x0800_0000, 0x0801_0000), and one spin-table cpu whose release
+    // address is `release_cells`.
+    fn merged_with_release(release_cells: &str) -> String {
+        format!(
+            "/dts-v1/;\n/ {{ #address-cells = <2>; #size-cells = <2>;\n\
+             memory@40000000 {{ device_type = \"memory\"; \
+             reg = <0x0 0x40000000 0x0 0x10000000>; }};\n\
+             intc@8000000 {{ reg = <0x0 0x8000000 0x0 0x10000>; }};\n\
+             cpus {{ #address-cells = <1>; #size-cells = <0>;\n\
+             cpu@0 {{ device_type = \"cpu\"; reg = <0>; enable-method = \"spin-table\";\n\
+             cpu-release-addr = {release_cells}; }}; }}; }};"
+        )
+    }
+
+    #[test]
+    fn release_addr_in_ram_accepted() {
+        let Some(bb) = dtc_compile(&merged_with_release("<0x0 0x40001000>")) else {
+            eprintln!("skipping: dtc not available");
+            return;
+        };
+        let tree: Tree<'_> = Tree::parse(&bb).unwrap();
+        validate_merged(&tree, TEST_PA_BITS).expect("release addr in RAM must pass");
+    }
+
+    #[test]
+    fn release_addr_over_device_rejected() {
+        let Some(bb) = dtc_compile(&merged_with_release("<0x0 0x8000000>")) else {
+            eprintln!("skipping: dtc not available");
+            return;
+        };
+        let tree: Tree<'_> = Tree::parse(&bb).unwrap();
+        assert_eq!(
+            validate_merged(&tree, TEST_PA_BITS),
+            Err(ValidationError::CpuReleaseAddrUnsafe)
+        );
+    }
+
+    #[test]
+    fn release_addr_outside_ram_rejected() {
+        let Some(bb) = dtc_compile(&merged_with_release("<0x0 0x90000000>")) else {
+            eprintln!("skipping: dtc not available");
+            return;
+        };
+        let tree: Tree<'_> = Tree::parse(&bb).unwrap();
+        assert_eq!(
+            validate_merged(&tree, TEST_PA_BITS),
+            Err(ValidationError::CpuReleaseAddrUnsafe)
+        );
+    }
+
+    #[test]
+    fn release_addr_out_of_range_rejected() {
+        // 0x1_0000_0000_0000 == 2^48; end overflows the test PA width.
+        let Some(bb) = dtc_compile(&merged_with_release("<0x10000 0x0>")) else {
+            eprintln!("skipping: dtc not available");
+            return;
+        };
+        let tree: Tree<'_> = Tree::parse(&bb).unwrap();
+        assert_eq!(
+            validate_merged(&tree, TEST_PA_BITS),
+            Err(ValidationError::NonCanonicalGpa)
+        );
+    }
+
+    // ----- Host-DTBO allowlist tests (dt.md §2) ---------------------
     //
     // The host authors the entire /cpus subtree via a root fragment (the
     // base declares no /cpus). These compile DTS with `dtc` at run time

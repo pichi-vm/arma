@@ -144,8 +144,8 @@ pub(crate) fn relocs_words(info: &TatuBootInfo) -> &'static [u32] {
 #[allow(unsafe_code)]
 fn region(gpa: u64, size: u32) -> &'static [u8] {
     // SAFETY: arma wrote the (gpa, size) pair to point at a PE
-    // section loaded by the VMM per PMI's `load` / `merged:dtbo`
-    // action before vCPU entry; pmi/spec/merged.md §2 makes the
+    // section loaded by the VMM per PMI's `load` / `dt:dtbo`
+    // action before vCPU entry; pmi/spec/dt.md §2 makes the
     // VMM responsible for `/memory@*` covering each region. Tatu
     // runs on a single boot vCPU with no IRQs or DMA — no
     // concurrent writer. The slice lives for the whole boot.

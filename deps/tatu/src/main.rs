@@ -106,7 +106,7 @@ use devtree::{Overlay, Tree};
 
 /// Maximum accepted host DTBO size. The `.tatu.dtbo` reservation is
 /// exactly 64 KiB; a larger host-controlled `host_dtbo_size` would make
-/// `host_dtbo_bytes` construct an out-of-bounds slice (pmi spec merged.md
+/// `host_dtbo_bytes` construct an out-of-bounds slice (pmi spec dt.md
 /// §2 — the merger MUST reject an overlay beyond its accepted bound).
 #[cfg(target_os = "none")]
 const HOST_DTBO_MAX: u32 = 64 * 1024;
@@ -143,20 +143,20 @@ extern "C" fn rust_main(bootinfo: &TatuBootInfo) -> ! {
     };
 
     // 3. Reject an oversized host overlay before parsing (resource-exhaustion
-    //    defense; pmi spec merged.md §2 / commit 3d6753b — the merger MUST
+    //    defense; pmi spec dt.md §2 / commit 3d6753b — the merger MUST
     //    reject an overlay beyond its accepted bound). See `HOST_DTBO_MAX`.
     if bootinfo.host_dtbo_size > HOST_DTBO_MAX {
         panic_halt(b"host dtbo: oversized");
     }
 
     // 3b. Parse the host-supplied DTBO (adversarial; filled into the
-    //     .dtbo section via the merged:dtbo fill kind).
+    //     .dtbo section via the dt:dtbo fill kind).
     let overlay: Overlay<'static> = match Overlay::parse(host_dtbo_bytes(bootinfo)) {
         Ok(o) => o,
         Err(_) => panic_halt(b"host dtbo: structural parse failed"),
     };
 
-    // 4. Enforce the merged-extension allowlist (pmi/spec/merged.md
+    // 4. Enforce the merged-extension allowlist (pmi/spec/dt.md
     //    §2) on the host DTBO against the base DTB template.
     if validate_host_dtbo(&overlay, &base).is_err() {
         panic_halt(b"host dtbo: allowlist rejection");
@@ -184,7 +184,7 @@ extern "C" fn rust_main(bootinfo: &TatuBootInfo) -> ! {
     };
 
     // 7. Validate the merged tree (schema + semantic + maxima).
-    //    PMI's merged.md §2 already requires the VMM to declare
+    //    PMI's dt.md §2 already requires the VMM to declare
     //    `/memory@*` covering every load/fill range and explicitly
     //    waives consumer-side validation — failures manifest as
     //    kernel boot DoS, observable to the host.
