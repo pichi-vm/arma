@@ -70,7 +70,7 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
         let cname = child.name().to_string();
         if let Some(reg) = child.property("reg") {
             let cells = be_cells(reg.as_ref());
-            for (i, chunk) in cells.chunks_exact(4).enumerate() {
+            for (i, chunk) in cells.as_chunks::<4>().0.iter().enumerate() {
                 let base = (u64::from(chunk[0]) << 32) | u64::from(chunk[1]);
                 let size = (u64::from(chunk[2]) << 32) | u64::from(chunk[3]);
                 if size == 0 {
@@ -248,8 +248,10 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
 /// Parse a devicetree cell property (big-endian u32s) from its raw bytes.
 fn be_cells(bytes: &[u8]) -> Vec<u32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_be_bytes(*c))
         .collect()
 }
 

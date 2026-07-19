@@ -1164,8 +1164,10 @@ mod tests {
         let bytes = std::fs::read(std::env::var("PICHI_VMLINUX").unwrap()).unwrap();
         let raw = std::fs::read(std::env::var("PICHI_GT").unwrap()).unwrap();
         let words: Vec<u32> = raw
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         // Split on zero terminators: [stop] r64 [stop] r32neg [stop] r32.
         let mut groups: Vec<Vec<u32>> = vec![Vec::new()];

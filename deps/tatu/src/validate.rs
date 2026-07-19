@@ -206,7 +206,8 @@ fn check_memory_node<N: NodeView>(node: &N) -> Result<(), ValidationError> {
     if !bytes.len().is_multiple_of(16) {
         return Err(ValidationError::HostOverlayMemoryOverflow);
     }
-    for chunk in bytes.chunks_exact(16) {
+    let (chunks, _) = bytes.as_chunks::<16>();
+    for chunk in chunks {
         let r = parse_one_region(chunk);
         if r.end().is_none() {
             return Err(ValidationError::HostOverlayMemoryOverflow);
@@ -274,7 +275,8 @@ fn extract_memory<N: NodeView>(
     if !bytes.len().is_multiple_of(16) {
         return Err(ValidationError::BadPropertyShape);
     }
-    for chunk in bytes.chunks_exact(16) {
+    let (chunks, _) = bytes.as_chunks::<16>();
+    for chunk in chunks {
         let r = parse_one_region(chunk);
         validate_region(r, pa_bits)?;
         regions
@@ -300,7 +302,8 @@ fn extract_device_regs<N: NodeView>(
     if !bytes.len().is_multiple_of(16) {
         return Err(ValidationError::BadPropertyShape);
     }
-    for chunk in bytes.chunks_exact(16) {
+    let (chunks, _) = bytes.as_chunks::<16>();
+    for chunk in chunks {
         let r = parse_one_region(chunk);
         validate_region(r, pa_bits)?;
         devices
