@@ -4,6 +4,11 @@
 //! End-to-end coverage of the `--dtb` channel modes (`dt` extension,
 //! pmi/spec/dt.md). Each mode must emit the base-DTB action, `dt:dtb`
 //! attribute, and PE sections the spec prescribes.
+//!
+//! The assertions are arch-neutral, but the fixtures build x86-64 PMIs (the
+//! `x86-64-v3` profile and x86 `CpuState` decode), so the whole file is gated
+//! to x86-64. aarch64 emission is covered by the unit tests in `manifest.rs`.
+#![cfg(target_arch = "x86_64")]
 
 mod common;
 
