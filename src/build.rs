@@ -131,6 +131,22 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         .infer_slots(arch, args.mmio_slots, args.pci_slots)
         .context("slot inference")?;
 
+    // Poweroff drivability: Arma always emits the arch-appropriate poweroff
+    // device, but a guest that can drive none of them will hang on `poweroff`
+    // instead of exiting the VM. Warn (not fatal — the guest still boots and
+    // runs; only clean shutdown is affected).
+    if kcfg.poweroff_support(arch) == kconfig::PoweroffSupport::Unsupported {
+        let needs = match arch {
+            kernel::Arch::X86_64 => "CONFIG_ACPI or CONFIG_POWER_RESET_SYSCON_POWEROFF",
+            kernel::Arch::Aarch64 => "CONFIG_ARM_PSCI_FW",
+        };
+        eprintln!(
+            "arma: warning: the kernel config exposes no poweroff mechanism the \
+             guest can drive (needs {needs}); the guest will not power off the VM \
+             on shutdown"
+        );
+    }
+
     // ---- Step 3: cpio auto-detect / wrap ----
     let initrd_materialized = initrd_bytes
         .as_deref()

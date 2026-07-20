@@ -41,6 +41,30 @@ pub(crate) enum SlotError {
     PciUnsupported,
 }
 
+/// How the guest kernel can drive the poweroff device Arma places in the
+/// base DTB — the per-arch answer to "will `poweroff` actually stop the VM?".
+/// Mirrors the node choice in [`crate::base_dtb`]: `/psci` on aarch64,
+/// `syscon-poweroff` on x86.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PoweroffSupport {
+    /// aarch64: PSCI `SYSTEM_OFF` (the `/psci` node), handled by the VMM's
+    /// SMC/HVC trap.
+    Psci,
+
+    /// x86: ACPI S5. tatu lowers the `syscon-poweroff` node into the FADT
+    /// sleep register + DSDT `_S5`; the guest's ACPI writes it and the VMM's
+    /// syscon device traps the write.
+    Acpi,
+
+    /// The kernel's own `syscon-poweroff` DT driver writes the register
+    /// directly, with no ACPI (the embedded path).
+    SysconDriver,
+
+    /// The kernel can drive none of the emitted poweroff devices — `poweroff`
+    /// will not stop the VM.
+    Unsupported,
+}
+
 impl KernelConfig {
     pub(crate) fn parse(text: String) -> Self {
         Self { text }
@@ -108,6 +132,39 @@ impl KernelConfig {
         self.is_set("CONFIG_PCI")
             && self.is_set("CONFIG_VIRTIO_PCI")
             && (!matches!(arch, Arch::Aarch64) || self.is_set("CONFIG_PCI_HOST_GENERIC"))
+    }
+
+    /// Detect how the guest will drive the poweroff device Arma emits into the
+    /// base DTB. Arma always places the arch-appropriate device (`/psci` on
+    /// aarch64, `syscon-poweroff` on x86); this reports whether *this* kernel
+    /// can actually consume it, so the build can warn when a guest would hang
+    /// on `poweroff` instead of exiting the VM.
+    ///
+    /// On x86 the one `syscon-poweroff` node is reachable two ways: through
+    /// ACPI (tatu lowers it into the FADT — the distro path, `CONFIG_ACPI`) or
+    /// through the kernel's own syscon DT driver
+    /// (`CONFIG_POWER_RESET_SYSCON_POWEROFF` — the embedded path). ACPI is
+    /// preferred when both are present. On aarch64 the mechanism is PSCI
+    /// (`CONFIG_ARM_PSCI_FW`), which stock arm64 kernels always build.
+    pub(crate) fn poweroff_support(&self, arch: Arch) -> PoweroffSupport {
+        match arch {
+            Arch::Aarch64 => {
+                if self.is_set("CONFIG_ARM_PSCI_FW") || self.is_set("CONFIG_ARM_PSCI") {
+                    PoweroffSupport::Psci
+                } else {
+                    PoweroffSupport::Unsupported
+                }
+            }
+            Arch::X86_64 => {
+                if self.is_set("CONFIG_ACPI") {
+                    PoweroffSupport::Acpi
+                } else if self.is_set("CONFIG_POWER_RESET_SYSCON_POWEROFF") {
+                    PoweroffSupport::SysconDriver
+                } else {
+                    PoweroffSupport::Unsupported
+                }
+            }
+        }
     }
 
     /// Resolve `(mmio_slots, pci_slots)` per §6 Slot composition:
@@ -242,6 +299,49 @@ mod tests {
             c.infer_slots(Arch::Aarch64, None, Some(4)),
             Err(SlotError::PciUnsupported)
         ));
+    }
+
+    #[test]
+    fn x86_poweroff_prefers_acpi() {
+        // Both ACPI and the DT driver present: ACPI wins (the distro path).
+        let c = cfg("CONFIG_ACPI=y\nCONFIG_POWER_RESET_SYSCON_POWEROFF=y\n");
+        assert_eq!(c.poweroff_support(Arch::X86_64), PoweroffSupport::Acpi);
+    }
+
+    #[test]
+    fn x86_poweroff_falls_back_to_syscon_driver() {
+        // No ACPI, but the kernel builds its own syscon-poweroff driver.
+        let c = cfg("# CONFIG_ACPI is not set\nCONFIG_POWER_RESET_SYSCON_POWEROFF=m\n");
+        assert_eq!(
+            c.poweroff_support(Arch::X86_64),
+            PoweroffSupport::SysconDriver
+        );
+    }
+
+    #[test]
+    fn x86_poweroff_unsupported_when_neither() {
+        // The Fedora-x86-without-ACPI trap: neither mechanism → the guest hangs.
+        let c = cfg("# CONFIG_ACPI is not set\n");
+        assert_eq!(
+            c.poweroff_support(Arch::X86_64),
+            PoweroffSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn aarch64_poweroff_is_psci() {
+        let c = cfg("CONFIG_ARM_PSCI_FW=y\n");
+        assert_eq!(c.poweroff_support(Arch::Aarch64), PoweroffSupport::Psci);
+    }
+
+    #[test]
+    fn aarch64_poweroff_unsupported_without_psci() {
+        // ACPI on aarch64 does not help — Arma emits `/psci` there, not syscon.
+        let c = cfg("CONFIG_ACPI=y\n");
+        assert_eq!(
+            c.poweroff_support(Arch::Aarch64),
+            PoweroffSupport::Unsupported
+        );
     }
 
     #[test]
