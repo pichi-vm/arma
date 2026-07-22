@@ -35,6 +35,17 @@ pub(crate) enum SlotError {
     MmioUnsupported,
 
     #[error(
+        "the kernel builds no virtio transport in — a default board needs \
+         built-in virtio-mmio (CONFIG_VIRTIO_MMIO=y) or virtio-pci \
+         (CONFIG_PCI + CONFIG_VIRTIO_PCI=y, plus CONFIG_PCI_HOST_GENERIC=y on \
+         aarch64). This kernel has a transport only as a module, which has no \
+         attach surface until it is loaded. Pass --mmio-slots/--pci-slots \
+         explicitly if the guest loads the transport module early (e.g. from \
+         its initramfs)"
+    )]
+    NoBuiltinTransport,
+
+    #[error(
         "--pci-slots requested but the kernel lacks PCI support \
          (needs CONFIG_PCI + CONFIG_VIRTIO_PCI, plus CONFIG_PCI_HOST_GENERIC on aarch64)"
     )]
@@ -95,6 +106,16 @@ impl KernelConfig {
         })
     }
 
+    /// True iff `CONFIG_<sym>=y` (built into the kernel — excludes `=m`).
+    fn is_builtin(&self, sym: &str) -> bool {
+        self.text.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix(sym)
+                .and_then(|rest| rest.strip_prefix('='))
+                .is_some_and(|v| v == "y")
+        })
+    }
+
     /// The kernel's ISA build floor (C2 clamp) — the lowest `--profile` the
     /// kernel can run on. Upstream Kconfig carries no clean x86-64 microarch
     /// symbol (it's a distro `-march` build flag), and aarch64 ISA features are
@@ -121,17 +142,40 @@ impl KernelConfig {
         }
     }
 
+    /// The kernel can drive virtio-mmio at all (built-in *or* module). Used to
+    /// validate an explicit `--mmio-slots`, where the operator vouches that the
+    /// module will be loaded before the devices are needed.
     fn supports_virtio_mmio(&self) -> bool {
         self.is_set("CONFIG_VIRTIO_MMIO")
     }
 
-    /// PCI ⇔ `CONFIG_PCI` + `CONFIG_VIRTIO_PCI` (and, on aarch64, the ECAM host
-    /// driver `CONFIG_PCI_HOST_GENERIC`). On x86 base config reaches the bridge
-    /// through the architectural `0xcf8`/`0xcfc` ports regardless.
+    /// virtio-mmio is built into the kernel (`=y`). Only a built-in transport
+    /// has an attach surface from the first instruction, so this — not mere
+    /// support — gates whether a *default* board emits virtio-mmio slots.
+    fn builtin_virtio_mmio(&self) -> bool {
+        self.is_builtin("CONFIG_VIRTIO_MMIO")
+    }
+
+    /// The kernel can drive virtio over PCI at all (built-in *or* module):
+    /// `CONFIG_PCI` + `CONFIG_VIRTIO_PCI` (and, on aarch64, the ECAM host driver
+    /// `CONFIG_PCI_HOST_GENERIC`). On x86 base config reaches the bridge through
+    /// the architectural `0xcf8`/`0xcfc` ports regardless. Used to validate an
+    /// explicit `--pci-slots`.
     fn supports_pci(&self, arch: Arch) -> bool {
         self.is_set("CONFIG_PCI")
             && self.is_set("CONFIG_VIRTIO_PCI")
             && (!matches!(arch, Arch::Aarch64) || self.is_set("CONFIG_PCI_HOST_GENERIC"))
+    }
+
+    /// virtio-over-PCI is usable from the first instruction — every piece is
+    /// built in (`=y`), not a module. Like [`builtin_virtio_mmio`], this — not
+    /// mere support — gates whether a *default* board emits a PCIe bridge: a
+    /// modular virtio-pci (or, on aarch64, a modular ECAM host driver) leaves
+    /// the bridge with no attach surface until the module loads.
+    fn builtin_pci(&self, arch: Arch) -> bool {
+        self.is_builtin("CONFIG_PCI")
+            && self.is_builtin("CONFIG_VIRTIO_PCI")
+            && (!matches!(arch, Arch::Aarch64) || self.is_builtin("CONFIG_PCI_HOST_GENERIC"))
     }
 
     /// Detect how the guest will drive the poweroff device Arma emits into the
@@ -169,38 +213,52 @@ impl KernelConfig {
 
     /// Resolve `(mmio_slots, pci_slots)` per §6 Slot composition:
     ///
-    /// - **Neither given** — 16 total, split by support (8/8 if both, else all
-    ///   16 to whichever single transport the kernel builds).
+    /// - **Neither given** — 16 total, split across the transports the kernel
+    ///   can use *without loading a module* — built-in virtio-mmio and/or
+    ///   built-in virtio-pci (8/8 if both, else all 16 to the single one). A
+    ///   transport built only as a module is deliberately excluded: it has no
+    ///   attach surface until the guest loads it, so its default slots (or PCIe
+    ///   bridge) would only be probed and rejected at boot. A kernel whose only
+    ///   transports are modular has no default board
+    ///   ([`SlotError::NoBuiltinTransport`]).
     /// - **Either given** — exactly what was asked (a missing flag is `0`),
     ///   failing if asked to declare a transport the kernel can't drive.
+    ///   Explicit slots accept a modular transport: the operator vouches the
+    ///   module is loaded before those devices are used.
     ///
-    /// Either way, fail if the kernel supports neither transport.
+    /// Either way, fail if the kernel supports neither transport at all.
     pub(crate) fn infer_slots(
         &self,
         arch: Arch,
         mmio_override: Option<u32>,
         pci_override: Option<u32>,
     ) -> Result<(u32, u32), SlotError> {
-        let mmio_ok = self.supports_virtio_mmio();
-        let pci_ok = self.supports_pci(arch);
-        if !mmio_ok && !pci_ok {
+        let mmio_drivable = self.supports_virtio_mmio(); // =y or =m
+        let mmio_builtin = self.builtin_virtio_mmio(); // =y only
+        let pci_drivable = self.supports_pci(arch); // =y or =m
+        let pci_builtin = self.builtin_pci(arch); // =y only
+        if !mmio_drivable && !pci_drivable {
             return Err(SlotError::NoTransport);
         }
 
         match (mmio_override, pci_override) {
-            (None, None) => Ok(match (mmio_ok, pci_ok) {
-                (true, true) => (8, 8),
-                (true, false) => (16, 0),
-                (false, true) => (0, 16),
-                (false, false) => unreachable!("guarded above"),
-            }),
+            // Default board: emit slots only for transports usable from the
+            // first instruction. A transport that is drivable but built as a
+            // module earns no default slots; route to whichever transport IS
+            // built in, and reject a kernel whose transports are all modular.
+            (None, None) => match (mmio_builtin, pci_builtin) {
+                (true, true) => Ok((8, 8)),
+                (true, false) => Ok((16, 0)),
+                (false, true) => Ok((0, 16)),
+                (false, false) => Err(SlotError::NoBuiltinTransport),
+            },
             (m, p) => {
                 let mmio = m.unwrap_or(0);
                 let pci = p.unwrap_or(0);
-                if mmio > 0 && !mmio_ok {
+                if mmio > 0 && !mmio_drivable {
                     return Err(SlotError::MmioUnsupported);
                 }
-                if pci > 0 && !pci_ok {
+                if pci > 0 && !pci_drivable {
                     return Err(SlotError::PciUnsupported);
                 }
                 Ok((mmio, pci))
@@ -253,15 +311,64 @@ mod tests {
         assert!(c.is_set("CONFIG_VIRTIO_MMIO")); // =m counts
         assert!(!c.is_set("CONFIG_FOO")); // "is not set"
         assert!(!c.is_set("CONFIG_PC")); // not a prefix match
+        // is_builtin is stricter: =y only, never =m.
+        assert!(c.is_builtin("CONFIG_PCI")); // =y
+        assert!(!c.is_builtin("CONFIG_VIRTIO_MMIO")); // =m is not built-in
     }
 
     #[test]
-    fn both_transports_split_8_8() {
-        // Alpine-like: PCI + ECAM + virtio-pci + virtio-mmio.
+    fn both_builtin_transports_split_8_8() {
+        // Both transports built in: split evenly.
         let c = cfg(
-            "CONFIG_PCI=y\nCONFIG_VIRTIO_PCI=y\nCONFIG_PCI_HOST_GENERIC=y\nCONFIG_VIRTIO_MMIO=m\n",
+            "CONFIG_PCI=y\nCONFIG_VIRTIO_PCI=y\nCONFIG_PCI_HOST_GENERIC=y\nCONFIG_VIRTIO_MMIO=y\n",
         );
         assert_eq!(c.infer_slots(Arch::Aarch64, None, None).unwrap(), (8, 8));
+    }
+
+    #[test]
+    fn modular_mmio_not_emitted_by_default() {
+        // Fedora-like: virtio-mmio is a module, PCI is built in. A default board
+        // must route everything to PCI and emit NO (empty, boot-probed) mmio
+        // slots — the module has no attach surface until the guest loads it.
+        let c = cfg("CONFIG_PCI=y\nCONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_MMIO=m\n");
+        assert_eq!(c.infer_slots(Arch::X86_64, None, None).unwrap(), (0, 16));
+        // An explicit request is still honored (the guest loads the module).
+        assert_eq!(c.infer_slots(Arch::X86_64, Some(2), None).unwrap(), (2, 0));
+    }
+
+    #[test]
+    fn modular_virtio_pci_not_emitted_by_default() {
+        // virtio-pci is a module, virtio-mmio is built in: the default board
+        // must route to mmio and emit no (useless) PCIe bridge.
+        let c = cfg("CONFIG_PCI=y\nCONFIG_VIRTIO_PCI=m\nCONFIG_VIRTIO_MMIO=y\n");
+        assert_eq!(c.infer_slots(Arch::X86_64, None, None).unwrap(), (16, 0));
+        // Explicit --pci-slots still honored (guest loads virtio_pci early).
+        assert_eq!(c.infer_slots(Arch::X86_64, None, Some(2)).unwrap(), (0, 2));
+    }
+
+    #[test]
+    fn aarch64_modular_host_generic_not_builtin_pci() {
+        // aarch64 with a modular ECAM host driver: PCI is drivable (module) but
+        // not built-in, so it earns no default bridge; mmio (built in) takes all.
+        let c = cfg(
+            "CONFIG_PCI=y\nCONFIG_VIRTIO_PCI=y\nCONFIG_PCI_HOST_GENERIC=m\nCONFIG_VIRTIO_MMIO=y\n",
+        );
+        assert_eq!(c.infer_slots(Arch::Aarch64, None, None).unwrap(), (16, 0));
+        // Explicit --pci-slots honored (the host driver loads early).
+        assert_eq!(c.infer_slots(Arch::Aarch64, None, Some(4)).unwrap(), (0, 4));
+    }
+
+    #[test]
+    fn all_modular_transports_have_no_default_board() {
+        // Every transport is a module: no default board is possible, but each
+        // explicit opt-in works (the operator vouches for early module load).
+        let c = cfg("CONFIG_PCI=y\nCONFIG_VIRTIO_PCI=m\nCONFIG_VIRTIO_MMIO=m\n");
+        assert!(matches!(
+            c.infer_slots(Arch::X86_64, None, None),
+            Err(SlotError::NoBuiltinTransport)
+        ));
+        assert_eq!(c.infer_slots(Arch::X86_64, Some(4), None).unwrap(), (4, 0));
+        assert_eq!(c.infer_slots(Arch::X86_64, None, Some(4)).unwrap(), (0, 4));
     }
 
     #[test]
