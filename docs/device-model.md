@@ -558,6 +558,16 @@ prints it — a read-only linter over the emitted base DTB and the PMI's load ma
 (it changes nothing). A clean `check` is part of what "sane output" means: every
 shipped image should pass it.
 
+### Command line edit — `arma cmdline <dtb> [cmdline]`
+
+Reads or rewrites `/chosen/bootargs` in a DTB file. With no `cmdline` argument it
+prints the current command line; with one it rewrites the property in place
+(verbatim). `bootargs` is decoupled from guest-physical placement — editing it
+disturbs no addresses, the device map, or the initrd extent — so this retunes a
+**detached** base DTB (delivered out-of-band as a standalone file) without
+rebuilding the PMI. It does not re-apply the `--serial` `earlycon` prefix; the
+operator owns the full command line at this point.
+
 It renders the **full address map**, with the **islands visually demarcated** —
 the device island(s), guest RAM, the PCIe BAR window and its burned buddy, and
 the loaded payload (tatu, kernel, initramfs, dtb) — and flags layout problems:

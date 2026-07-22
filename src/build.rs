@@ -4,10 +4,11 @@
 //! Top-level build pipeline.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+use crate::fs_ext::AtomicWrite;
 use crate::{base_dtb, bootinfo, initrd, kconfig, kernel, manifest, pe, planner, tatu};
 
 pub(crate) use crate::manifest::DtbMode;
@@ -289,7 +290,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     // Detached mode: the base DTB is delivered out-of-band, so write the
     // generated base to the caller's path instead of bundling it in the PMI.
     if let (manifest::DtbMode::Detached, Some(path)) = (args.dtb_mode, args.dtb_out.as_ref()) {
-        atomic_write(path, &dtb_bytes)?;
+        path.atomic_write(&dtb_bytes)?;
     }
 
     // ---- Step 11: assemble PE section list ----
@@ -308,7 +309,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     // ---- Step 12: emit PE; atomic write ----
     let pe_bytes = pe::build_pe(arch.pe_machine(), &sections).context("emit PE")?;
 
-    atomic_write(&args.output_path, &pe_bytes)?;
+    args.output_path.atomic_write(&pe_bytes)?;
     Ok(())
 }
 
@@ -610,21 +611,4 @@ mod tests_alloc {
         let alloc = compute_kernel_alloc_size(0x10_000_000, None, Some(elf));
         assert_eq!(alloc, 0x10_000_000);
     }
-}
-
-fn atomic_write(dst: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = dst
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let tmp_name = format!(
-        ".{}.arma.tmp",
-        dst.file_name()
-            .map_or_else(|| "out".to_string(), |n| n.to_string_lossy().into_owned())
-    );
-    let tmp = dir.join(tmp_name);
-    fs::write(&tmp, bytes).with_context(|| format!("write tmp: {}", tmp.display()))?;
-    fs::rename(&tmp, dst)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), dst.display()))?;
-    Ok(())
 }

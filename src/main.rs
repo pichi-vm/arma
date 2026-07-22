@@ -16,6 +16,8 @@ mod base_dtb;
 mod bootinfo;
 mod build;
 mod check;
+mod cmdline;
+mod fs_ext;
 mod initrd;
 mod kconfig;
 mod kernel;
@@ -52,12 +54,27 @@ enum Command {
     /// (device island, payload, the PCIe BAR window + burned buddy) and flags
     /// fragmentation, alignment, and the window invariants. See device-model §6.
     Check(CheckArgs),
+
+    /// Read or rewrite the kernel command line (`/chosen/bootargs`) in a DTB.
+    /// With no CMDLINE argument, prints the current command line; with one,
+    /// rewrites it in place. Operates on a DTB file (e.g. a detached base).
+    Cmdline(CmdlineArgs),
 }
 
 #[derive(Args)]
 struct CheckArgs {
     /// The PMI to inspect.
     pmi: PathBuf,
+}
+
+#[derive(Args)]
+struct CmdlineArgs {
+    /// The DTB file to read or modify.
+    dtb: PathBuf,
+
+    /// New command line. Omit to print `/chosen/bootargs`; provide to rewrite
+    /// it in place (written verbatim).
+    cmdline: Option<String>,
 }
 
 #[derive(Args)]
@@ -171,6 +188,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Build(a) => build::run(&a.into()),
         Command::Check(a) => check::run(&a.pmi),
+        Command::Cmdline(a) => cmdline::run(&a.dtb, a.cmdline.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -29,7 +29,10 @@ goblin = { version = "0.10", default-features = false, features = [
     "std",
 ] }
 vm-fdt = "0.3"
-devtree.workspace = true
+# `alloc` enables devtree's owned/mutable tree (OwnedTree), which `arma cmdline`
+# uses to rewrite `/chosen/bootargs`. Scoped to this host crate so tatu and its
+# helpers keep devtree as pure no_std (they consume only the zero-copy reader).
+devtree = { workspace = true, features = ["alloc"] }
 flate2 = "1"
 ruzstd = "0.8"
 zerocopy = { version = "0.8", features = ["derive"] }
