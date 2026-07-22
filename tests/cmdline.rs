@@ -23,7 +23,7 @@ fn cmdline(dtb: &std::path::Path, new: Option<&str>) -> String {
         cmd.arg(s);
     }
     let out = cmd.output().expect("spawn arma cmdline");
-    assert!(out.status.success(), "arma cmdline failed: {out:?}",);
+    assert!(out.status.success(), "arma cmdline failed: {out:?}");
     String::from_utf8(out.stdout).expect("utf8 stdout")
 }
 
