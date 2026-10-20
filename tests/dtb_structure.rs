@@ -35,10 +35,7 @@ fn build_x86(cmdline: &str, with_initrd: bool) -> Option<(TempDir, Vec<u8>)> {
     let pmi = tmp.path().join("out.pmi");
     let initrd = if with_initrd {
         let p = tmp.path().join("init");
-        // Cpio-magic-prefixed payload — arma's initrd handler passes
-        // cpio archives through unchanged; the test exercises layout/DTB,
-        // not cpio contents.
-        fs::write(&p, b"070701DUMMY_CPIO_PAYLOAD").unwrap();
+        fs::write(&p, include_bytes!("data/initramfs.cpio")).unwrap();
         Some(p)
     } else {
         None

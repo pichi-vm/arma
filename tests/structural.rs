@@ -33,8 +33,7 @@ fn x86_fixture() -> Option<&'static Fixture> {
         let tmp = TempDir::new().unwrap();
         let init = tmp.path().join("init");
         let pmi = tmp.path().join("out.pmi");
-        // Cpio-magic-prefixed payload — arma passes cpio through unchanged.
-        fs::write(&init, b"070701FAKE_CPIO_FOR_X86_FIXTURE").unwrap();
+        fs::write(&init, include_bytes!("data/initramfs.cpio")).unwrap();
         build_pmi(kernel, Some(&init), "console=ttyS0", config, &pmi);
         Some(Fixture {
             pmi_bytes: fs::read(&pmi).unwrap(),
@@ -596,8 +595,7 @@ fn determinism_two_builds_same_inputs_same_output() {
     let init = tmp.path().join("init");
     let pmi1 = tmp.path().join("out1.pmi");
     let pmi2 = tmp.path().join("out2.pmi");
-    // Cpio-magic-prefixed payload — arma passes cpio through unchanged.
-    fs::write(&init, b"070701DETERMINISTIC_CPIO").unwrap();
+    fs::write(&init, include_bytes!("data/initramfs.cpio")).unwrap();
     build_pmi(kernel, Some(&init), "ro", config, &pmi1);
     build_pmi(kernel, Some(&init), "ro", config, &pmi2);
     let b1 = fs::read(&pmi1).unwrap();

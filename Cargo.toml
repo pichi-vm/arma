@@ -34,7 +34,7 @@ vm-fdt = "0.3"
 # helpers keep devtree as pure no_std (they consume only the zero-copy reader).
 devtree = { workspace = true, features = ["alloc"] }
 flate2 = "1"
-ruzstd = "0.8"
+ruzstd = "0.9.1"
 zerocopy = { version = "0.8", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

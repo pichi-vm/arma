@@ -84,7 +84,7 @@ fn build(e: &Entry, case: Case, dir: &Path) -> Option<Vec<u8>> {
     }
     if case.initrd {
         let init = dir.join("init");
-        std::fs::write(&init, b"070701FAKE_CPIO_INITRD_PAYLOAD").unwrap();
+        std::fs::write(&init, include_bytes!("data/initramfs.cpio")).unwrap();
         cmd.arg("--initrd").arg(&init);
     }
     cmd.arg(&pmi);

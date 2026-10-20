@@ -486,9 +486,16 @@ the platform's addressing and identity.
   not read the kernel's embedded config); if omitted, Arma falls back to the
   kernel's embedded config (`CONFIG_IKCONFIG`) and errors if that is absent too.
   Drives slot inference and drivability checks.
-- **`--initrd <path>`** — initial userspace. A `cpio` (newc) archive is used as
-  the initramfs verbatim; a static binary is wrapped in a single-entry `cpio` at
-  `/init`.
+- **`--initrd <path>`** — initial userspace. A complete `cpio` newc archive
+  (`070701`), uncompressed or compressed with gzip or zstd, is used verbatim.
+  These are the same compression formats Arma supports for kernel ingestion.
+  Compressed inputs are decoded to validate the archive and checksums, not
+  recompressed or replaced; the guest kernel therefore needs `CONFIG_RD_GZIP`
+  or `CONFIG_RD_ZSTD`, respectively. Malformed/truncated streams or archives
+  (including missing trailers) are rejected. Zero padding and concatenated
+  archives/members/frames are accepted; other compression formats are not.
+  A static ELF binary is wrapped in a newc archive at `/init`; dynamically
+  linked executables remain unsupported.
 - **`--cmdline <string>`** _(required)_ — kernel command line. Arma never
   supplies a default.
 - **`--profile <profile>`** — vCPU ISA baseline, written to `cpu:profile`; the

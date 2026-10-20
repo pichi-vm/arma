@@ -3,9 +3,10 @@
 
 //! Initrd input handling.
 //!
-//! Accepts exactly two input shapes:
+//! Accepts two input shapes:
 //!
-//! 1. A cpio newc archive — passed through unchanged.
+//! 1. A complete cpio newc archive, uncompressed or gzip/zstd compressed —
+//!    validated and passed through unchanged. Linux decompresses it at boot.
 //! 2. A statically-linked ELF executable — wrapped in a single-entry
 //!    cpio newc archive containing `/`, `/dev`, `/dev/console`, `/init`
 //!    and `TRAILER!!!`.
@@ -23,6 +24,7 @@
 //!   - "static" means the ELF has no `PT_INTERP` program header.
 
 use std::borrow::Cow;
+use std::io::Read;
 
 use goblin::elf::Elf;
 use goblin::elf::program_header::PT_INTERP;
@@ -48,9 +50,15 @@ pub(crate) enum InitrdError {
 
     /// The input is neither a cpio newc archive nor an ELF binary.
     #[error(
-        "initrd input is neither a cpio newc archive (magic `070701`) nor an ELF binary (magic `\\x7fELF`)"
+        "initrd input is neither a cpio newc archive (uncompressed, gzip or zstd) nor an ELF binary"
     )]
     UnsupportedFormat,
+
+    #[error("malformed or truncated cpio newc initramfs")]
+    MalformedArchive,
+
+    #[error("initramfs decompression failed: {0}")]
+    Decompress(#[from] std::io::Error),
 
     /// The input is an ELF but failed to parse.
     #[error("failed to parse ELF initrd input")]
@@ -94,10 +102,54 @@ fn check_static_elf(bytes: &[u8]) -> Result<(), InitrdError> {
 /// is wrapped in a single-entry cpio archive at `/init`. Any other
 /// input is rejected.
 ///
-/// A caller-supplied cpio archive is passed through unchecked — its
-/// internal validity is the caller's responsibility.
+/// Compressed archives are decoded only for validation; the original bytes
+/// are preserved, so the kernel needs the matching CONFIG_RD_GZIP/ZSTD driver.
 pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
     if is_cpio(input) {
+        validate_cpio(input).ok_or(InitrdError::MalformedArchive)?;
+        return Ok(Cow::Borrowed(input));
+    }
+    if input.starts_with(&[0x1f, 0x8b]) {
+        let mut remaining = input;
+        let mut decoded = Vec::new();
+        while !remaining.is_empty() {
+            flate2::bufread::GzDecoder::new(&mut remaining).read_to_end(&mut decoded)?;
+            remaining = skip_padding(remaining);
+        }
+        validate_cpio(&decoded).ok_or(InitrdError::MalformedArchive)?;
+        return Ok(Cow::Borrowed(input));
+    }
+    if input.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        let mut remaining = input;
+        let mut decoded = Vec::new();
+        while !remaining.is_empty() {
+            // ruzstd does not reject the reserved frame-descriptor bit or
+            // enforce declared content size; check both at this boundary.
+            let descriptor = *remaining.get(4).ok_or(InitrdError::MalformedArchive)?;
+            if descriptor & 0x08 != 0 {
+                return Err(InitrdError::MalformedArchive);
+            }
+            let mut decoder = ruzstd::decoding::StreamingDecoder::new(remaining)
+                .map_err(std::io::Error::other)?;
+            let before = decoded.len();
+            decoder.read_to_end(&mut decoded)?;
+            if (descriptor & 0xe0 != 0)
+                && decoder.decoder.content_size() != (decoded.len() - before) as u64
+            {
+                return Err(InitrdError::MalformedArchive);
+            }
+            if let Some(expected) = decoder.decoder.get_checksum_from_data()
+                && decoder.decoder.get_calculated_checksum() != Some(expected)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "zstd initramfs checksum mismatch",
+                )
+                .into());
+            }
+            remaining = skip_padding(decoder.into_inner());
+        }
+        validate_cpio(&decoded).ok_or(InitrdError::MalformedArchive)?;
         return Ok(Cow::Borrowed(input));
     }
     if is_elf(input) {
@@ -108,6 +160,53 @@ pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
         return Ok(Cow::Owned(wrap_as_cpio(input)));
     }
     Err(InitrdError::UnsupportedFormat)
+}
+
+/// Check complete newc records, including the trailer, before passing bytes
+/// to Linux. Accept zero padding and concatenated archives as initramfs does.
+/// No extraction or pathname interpretation is needed here.
+fn validate_cpio(mut bytes: &[u8]) -> Option<()> {
+    loop {
+        loop {
+            let header = bytes.get(..110)?;
+            if !header.starts_with(NEWC_MAGIC) {
+                return None;
+            }
+            let mut fields = [0u32; 13];
+            for (field, hex) in fields.iter_mut().zip(header[6..].as_chunks::<8>().0) {
+                if !hex.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                *field = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+            }
+            let size = usize::try_from(fields[6]).ok()?;
+            let namesize = usize::try_from(fields[11]).ok()?;
+            let name_end = 110usize.checked_add(namesize)?;
+            let name = bytes.get(110..name_end)?;
+            if name.last() != Some(&0) || name[..name.len() - 1].contains(&0) || fields[12] != 0 {
+                return None;
+            }
+            let data_start = name_end.checked_add(3)? & !3;
+            let data_end = data_start.checked_add(size)?;
+            let next = data_end.checked_add(3)? & !3;
+            bytes = bytes.get(next..)?;
+            if name == b"TRAILER!!!\0" {
+                if size != 0 {
+                    return None;
+                }
+                break;
+            }
+        }
+        bytes = skip_padding(bytes);
+        if bytes.is_empty() {
+            return Some(());
+        }
+    }
+}
+
+/// Linux initramfs permits NUL padding between complete components.
+fn skip_padding(bytes: &[u8]) -> &[u8] {
+    &bytes[bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len())..]
 }
 
 /// Emit a cpio newc entry with the given inode, mode, link count,
@@ -275,14 +374,14 @@ mod tests {
 
     #[test]
     fn materialize_passes_cpio_through_unchanged() {
-        let cpio = b"070701FAKEDATA".to_vec();
+        let cpio = include_bytes!("../tests/data/initramfs.cpio").to_vec();
         let out = materialize(&cpio).unwrap();
         assert_eq!(out.as_ref(), cpio.as_slice());
     }
 
     #[test]
     fn materialize_borrows_cpio_input_without_copying() {
-        let cpio = b"070701PASSTHROUGH".to_vec();
+        let cpio = include_bytes!("../tests/data/initramfs.cpio").to_vec();
         let out = materialize(&cpio).unwrap();
         // The pass-through path MUST be Borrowed — for multi-MiB
         // initrds this avoids an extra full-buffer copy.
@@ -329,6 +428,114 @@ mod tests {
     fn materialize_rejects_empty_input() {
         let err = materialize(b"").unwrap_err();
         assert!(matches!(err, InitrdError::UnsupportedFormat));
+    }
+
+    #[rstest::rstest]
+    #[case(include_bytes!("../tests/data/initramfs.cpio").as_slice())]
+    #[case(include_bytes!("../tests/data/initramfs.cpio.gz").as_slice())]
+    #[case(include_bytes!("../tests/data/initramfs.cpio.zst").as_slice())]
+    fn complete_archives_are_preserved(#[case] input: &[u8]) {
+        let out = materialize(input).unwrap();
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), input);
+        assert!(materialize(&input[..input.len() / 2]).is_err());
+        let joined = [input, input].concat();
+        assert_eq!(materialize(&joined).unwrap().as_ref(), joined);
+        let padded = [input, &[0; 16], input, &[0; 16]].concat();
+        assert_eq!(materialize(&padded).unwrap().as_ref(), padded);
+        let mut bad_second = joined;
+        bad_second.pop();
+        if !is_cpio(input) {
+            assert!(materialize(&bad_second).is_err());
+        }
+    }
+
+    #[test]
+    fn validates_zstd_headers_with_and_without_content_size_or_checksum() {
+        let frame = include_bytes!("../tests/data/initramfs.cpio.zst");
+        for offset in [4, 5] {
+            let mut bad = frame.to_vec();
+            bad[offset] ^= if offset == 4 { 0x08 } else { 1 };
+            assert!(materialize(&bad).is_err());
+        }
+        // A raw-block frame, 1 KiB window, no content size and no checksum.
+        // This valid streaming form must not be mistaken for a zero-byte frame.
+        let archive = include_bytes!("../tests/data/initramfs.cpio");
+        let mut streaming = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0];
+        let block_header = ((archive.len() as u32) << 3) | 1;
+        streaming.extend_from_slice(&block_header.to_le_bytes()[..3]);
+        streaming.extend_from_slice(archive);
+        assert_eq!(materialize(&streaming).unwrap().as_ref(), streaming);
+    }
+
+    #[test]
+    fn compressed_fixtures_decode_to_the_complete_archive() {
+        let expected = include_bytes!("../tests/data/initramfs.cpio");
+        let mut gzip = Vec::new();
+        flate2::read::MultiGzDecoder::new(
+            include_bytes!("../tests/data/initramfs.cpio.gz").as_slice(),
+        )
+        .read_to_end(&mut gzip)
+        .unwrap();
+        assert_eq!(gzip, expected);
+        let mut zstd = Vec::new();
+        ruzstd::decoding::StreamingDecoder::new(
+            include_bytes!("../tests/data/initramfs.cpio.zst").as_slice(),
+        )
+        .unwrap()
+        .read_to_end(&mut zstd)
+        .unwrap();
+        assert_eq!(zstd, expected);
+    }
+
+    #[test]
+    fn rejects_truncated_records_and_invalid_name_or_size() {
+        let archive = include_bytes!("../tests/data/initramfs.cpio");
+        let trailer = archive
+            .windows(10)
+            .position(|w| w == b"TRAILER!!!")
+            .unwrap();
+        for end in 0..trailer + 10 {
+            assert!(
+                materialize(&archive[..end]).is_err(),
+                "accepted prefix {end}"
+            );
+        }
+        for (offset, replacement) in [(94, b"00000000"), (54, b"FFFFFFFF")] {
+            let mut bad = archive.to_vec();
+            bad[offset..offset + 8].copy_from_slice(replacement);
+            assert!(materialize(&bad).is_err());
+        }
+        let mut bad_name = archive.to_vec();
+        bad_name[114] = b'!';
+        assert!(materialize(&bad_name).is_err());
+        let wrapped = wrap_as_cpio(b"test executable");
+        assert!(validate_cpio(&wrapped).is_some());
+    }
+
+    #[test]
+    fn rejects_malformed_archives_and_compressed_non_archives() {
+        use std::io::Write;
+
+        assert!(materialize(b"070701FAKEDATA").is_err());
+        let mut bad = include_bytes!("../tests/data/initramfs.cpio").to_vec();
+        bad[14] = b'!'; // invalid mode field
+        assert!(materialize(&bad).is_err());
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(b"not a cpio archive").unwrap();
+        assert!(materialize(&gzip.finish().unwrap()).is_err());
+        for input in [
+            include_bytes!("../tests/data/initramfs.cpio.gz").as_slice(),
+            include_bytes!("../tests/data/initramfs.cpio.zst").as_slice(),
+        ] {
+            assert!(materialize(&input[..input.len() - 1]).is_err());
+            let mut corrupt = input.to_vec();
+            *corrupt.last_mut().unwrap() ^= 1;
+            assert!(materialize(&corrupt).is_err());
+            let mut trailing = input.to_vec();
+            trailing.extend_from_slice(b"garbage");
+            assert!(materialize(&trailing).is_err());
+        }
     }
 
     #[test]
