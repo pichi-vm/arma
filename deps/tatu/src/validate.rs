@@ -420,8 +420,8 @@ fn region_contains(outer: Region, inner: Region) -> bool {
 /// chunking, so this function is total.
 fn parse_one_region(chunk: &[u8]) -> Region {
     debug_assert_eq!(chunk.len(), 16);
-    // `chunks_exact(16)` guarantees exactly 16 bytes, so both
-    // `try_into` calls are infallible. `unwrap_or_default` keeps
+    // Fixed-size chunking at the callers guarantees exactly 16 bytes,
+    // so both `try_into` calls are infallible. `unwrap_or_default` keeps
     // the function total without pulling in `unwrap`.
     let gpa = u64::from_be_bytes(chunk[..8].try_into().unwrap_or_default());
     let size = u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default());
