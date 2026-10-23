@@ -184,8 +184,8 @@ pub(crate) fn try_decode_at_base(buf: impl AsRef<[u8]>, base_gpa: u64) -> Result
         return Err("XSDT body not u64-aligned".into());
     }
     let mut entries = Vec::new();
-    for chunk in buf[body_start..body_end].chunks_exact(8) {
-        entries.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in buf[body_start..body_end].as_chunks::<8>().0 {
+        entries.push(u64::from_le_bytes(*chunk));
     }
     let xsdt = Xsdt {
         header: xsdt_header.clone(),
@@ -248,7 +248,7 @@ pub(crate) fn try_decode_at_base(buf: impl AsRef<[u8]>, base_gpa: u64) -> Result
     if let Some(h) = tables.get(b"MCFG") {
         let body_start = h.offset_in_buf + 44; // SDT header + 8
         let body_end = h.offset_in_buf + h.length as usize;
-        for chunk in buf[body_start..body_end].chunks_exact(16) {
+        for chunk in buf[body_start..body_end].as_chunks::<16>().0 {
             let base = u64::from_le_bytes(chunk[..8].try_into().unwrap());
             let seg = u16::from_le_bytes(chunk[8..10].try_into().unwrap());
             let bs = chunk[10];

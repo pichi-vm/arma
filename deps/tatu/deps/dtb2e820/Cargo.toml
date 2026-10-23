@@ -2,7 +2,7 @@
 name = "dtb2e820"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version.workspace = true
 license.workspace = true
 
 [lints]

@@ -359,10 +359,11 @@ impl<N: NodeView + Copy> DtbNode<N> {
 /// parent cell counts).
 #[inline]
 pub(crate) fn cells_as_u32s(raw: &[u8]) -> impl Iterator<Item = u32> + '_ {
-    raw.chunks_exact(4).map(|c| {
-        let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
-        u32::from_be_bytes(arr)
-    })
+    raw.as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(u32::from_be_bytes)
 }
 
 #[cfg(test)]
