@@ -54,6 +54,15 @@ pub(crate) enum InitrdError {
     )]
     UnsupportedFormat,
 
+    #[error("module options require a static ELF init, not an existing initramfs")]
+    ModulesRequireStatic,
+
+    #[error("unsafe or conflicting module archive path: {0}")]
+    ModulePath(String),
+
+    #[error("initramfs entry exceeds newc field limits or addressable archive size")]
+    ArchiveTooLarge,
+
     #[error("malformed or truncated cpio newc initramfs")]
     MalformedArchive,
 
@@ -160,6 +169,148 @@ pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
         return Ok(Cow::Owned(wrap_as_cpio(input)));
     }
     Err(InitrdError::UnsupportedFormat)
+}
+
+/// A selected module, relative to the release-specific source tree.
+#[derive(Debug)]
+pub(crate) struct Module<'a> {
+    pub(crate) path: &'a std::path::Path,
+    pub(crate) bytes: &'a [u8],
+}
+
+pub(crate) fn check_module_init(input: &[u8]) -> Result<(), InitrdError> {
+    if !is_elf(input) {
+        return Err(InitrdError::ModulesRequireStatic);
+    }
+    check_static_elf(input)
+}
+
+pub(crate) fn materialize_modules(
+    input: &[u8],
+    release: &str,
+    modules: &[Module<'_>],
+) -> Result<Vec<u8>, InitrdError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Component;
+
+    check_module_init(input)?;
+    checked_entry_size(0, "init".len(), input.len())?;
+    if modules.is_empty() {
+        return materialize(input).map(Cow::into_owned);
+    }
+    crate::kernel_release::validate_component(release)
+        .map_err(|_| InitrdError::ModulePath(release.to_owned()))?;
+    let mut directories = BTreeSet::from([".".to_string(), "dev".to_string()]);
+    let mut files = BTreeMap::new();
+    for module in modules {
+        let mut parts = Vec::new();
+        for component in module.path.components() {
+            let Component::Normal(part) = component else {
+                return Err(InitrdError::ModulePath(module.path.display().to_string()));
+            };
+            let part = part
+                .to_str()
+                .filter(|p| {
+                    !p.is_empty()
+                        && !p
+                            .chars()
+                            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+                })
+                .ok_or_else(|| InitrdError::ModulePath(module.path.display().to_string()))?;
+            parts.push(part);
+        }
+        if parts.is_empty() {
+            return Err(InitrdError::ModulePath(module.path.display().to_string()));
+        }
+        let path = format!("usr/lib/modules/{release}/{}", parts.join("/"));
+        let mut parent = std::path::Path::new(&path).parent();
+        while let Some(dir) = parent.filter(|d| !d.as_os_str().is_empty()) {
+            let name = dir
+                .to_str()
+                .ok_or_else(|| InitrdError::ModulePath(path.clone()))?;
+            // Archive separators are POSIX even on Windows hosts.
+            directories.insert(name.replace('\\', "/"));
+            parent = dir.parent();
+        }
+        if let Some(previous) = files.insert(path.clone(), module.bytes)
+            && previous != module.bytes
+        {
+            return Err(InitrdError::ModulePath(path));
+        }
+    }
+    if files.keys().any(|name| directories.contains(name)) {
+        return Err(InitrdError::ModulePath(
+            "file/directory collision".to_string(),
+        ));
+    }
+    let mut links = BTreeMap::new();
+    for directory in &directories {
+        if directory == "." {
+            continue;
+        }
+        let parent = directory.rsplit_once('/').map_or(".", |(p, _)| p);
+        let count = links.entry(parent).or_insert(2u32);
+        *count = count.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
+    }
+    let mut out = Vec::new();
+    let mut ino = 0u32;
+    for directory in &directories {
+        ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
+        let link_count = links.get(directory.as_str()).copied().unwrap_or(2);
+        checked_entry(&mut out, ino, 0o040_755, link_count, directory, &[], None)?;
+    }
+    ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
+    checked_entry(
+        &mut out,
+        ino,
+        0o020_666,
+        1,
+        "dev/console",
+        &[],
+        Some((5, 1)),
+    )?;
+    ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
+    checked_entry(&mut out, ino, 0o100_755, 1, "init", input, None)?;
+    for (name, bytes) in files {
+        ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
+        checked_entry(&mut out, ino, 0o100_644, 1, &name, bytes, None)?;
+    }
+    checked_entry(&mut out, 0, 0, 1, "TRAILER!!!", &[], None)?;
+    Ok(out)
+}
+
+fn checked_entry_size(offset: usize, name_len: usize, size: usize) -> Result<usize, InitrdError> {
+    let namesize = name_len
+        .checked_add(1)
+        .ok_or(InitrdError::ArchiveTooLarge)?;
+    u32::try_from(namesize).map_err(|_| InitrdError::ArchiveTooLarge)?;
+    u32::try_from(size).map_err(|_| InitrdError::ArchiveTooLarge)?;
+    let end = offset
+        .checked_add(110)
+        .and_then(|n| n.checked_add(namesize))
+        .and_then(|n| n.checked_add(3))
+        .map(|n| n & !3)
+        .and_then(|n| n.checked_add(size))
+        .and_then(|n| n.checked_add(3))
+        .map(|n| n & !3)
+        .ok_or(InitrdError::ArchiveTooLarge)?;
+    end.checked_sub(offset).ok_or(InitrdError::ArchiveTooLarge)
+}
+
+fn checked_entry(
+    out: &mut Vec<u8>,
+    ino: u32,
+    mode: u32,
+    nlink: u32,
+    name: &str,
+    bytes: &[u8],
+    rdev: Option<(u32, u32)>,
+) -> Result<(), InitrdError> {
+    let additional = checked_entry_size(out.len(), name.len(), bytes.len())?;
+    out.try_reserve(additional)
+        .map_err(|_| InitrdError::ArchiveTooLarge)?;
+    cpio_entry(out, ino, mode, nlink, name, bytes, rdev);
+    Ok(())
 }
 
 /// Check complete newc records, including the trailer, before passing bytes
@@ -288,6 +439,169 @@ fn wrap_as_cpio(init_binary: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_archive_contains_only_selected_bytes_and_normalized_metadata() {
+        let binary = synth_elf(&[]);
+        let payload = b"module payload";
+        let files = [Module {
+            path: std::path::Path::new("kernel/drivers/test.ko"),
+            bytes: payload,
+        }];
+        let archive = materialize_modules(&binary, "7.2-test", &files).unwrap();
+        assert!(validate_cpio(&archive).is_some());
+        let entries = inspect_newc(&archive);
+        assert_eq!(entries["init"].0, binary);
+        assert_eq!(
+            entries["usr/lib/modules/7.2-test/kernel/drivers/test.ko"].0,
+            payload
+        );
+        assert_eq!(
+            entries["usr/lib/modules/7.2-test/kernel/drivers/test.ko"].1,
+            0o100_644
+        );
+        assert!(entries.contains_key("dev/console"));
+        assert!(!entries.keys().any(|name| name.ends_with("modules.dep")));
+    }
+
+    #[test]
+    fn module_archive_preserves_safe_local_release_suffix() {
+        let binary = synth_elf(&[]);
+        let modules = [Module {
+            path: std::path::Path::new("a.ko"),
+            bytes: b"x",
+        }];
+        let archive = materialize_modules(&binary, "6.18-local~test@build", &modules).unwrap();
+        assert!(inspect_newc(&archive).contains_key("usr/lib/modules/6.18-local~test@build/a.ko"));
+    }
+
+    #[test]
+    fn module_archive_is_order_independent_and_preserves_compression() {
+        let binary = synth_elf(&[]);
+        let a = Module {
+            path: std::path::Path::new("kernel/a.ko.zst"),
+            bytes: b"compressed bytes",
+        };
+        let b = Module {
+            path: std::path::Path::new("extra/b.ko"),
+            bytes: b"uncompressed bytes",
+        };
+        let first = materialize_modules(&binary, "7.2-test", &[a, b]).unwrap();
+        let second = materialize_modules(
+            &binary,
+            "7.2-test",
+            &[
+                Module {
+                    path: std::path::Path::new("extra/b.ko"),
+                    bytes: b"uncompressed bytes",
+                },
+                Module {
+                    path: std::path::Path::new("kernel/a.ko.zst"),
+                    bytes: b"compressed bytes",
+                },
+                Module {
+                    path: std::path::Path::new("kernel/a.ko.zst"),
+                    bytes: b"compressed bytes",
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            inspect_newc(&first)["usr/lib/modules/7.2-test/kernel/a.ko.zst"].0,
+            b"compressed bytes"
+        );
+        assert_eq!(
+            materialize_modules(&binary, "7.2-test", &[]).unwrap(),
+            materialize(&binary).unwrap().as_ref()
+        );
+    }
+
+    #[test]
+    fn module_archive_rejects_unsafe_inputs_and_bounded_field_overflows() {
+        let binary = synth_elf(&[]);
+        for path in [
+            "../escape.ko",
+            "/absolute.ko",
+            "C:\\escape.ko",
+            "bad\nname.ko",
+            "",
+        ] {
+            let modules = [Module {
+                path: std::path::Path::new(path),
+                bytes: b"x",
+            }];
+            assert!(
+                materialize_modules(&binary, "7.2-test", &modules).is_err(),
+                "{path:?}"
+            );
+        }
+        let modules = [Module {
+            path: std::path::Path::new("x.ko"),
+            bytes: b"x",
+        }];
+        for release in ["", ".", "..", "../7", "7/escape", "7\n"] {
+            assert!(materialize_modules(&binary, release, &modules).is_err());
+        }
+        for archive in [
+            include_bytes!("../tests/data/initramfs.cpio").as_slice(),
+            include_bytes!("../tests/data/initramfs.cpio.gz").as_slice(),
+            b"not ELF",
+        ] {
+            assert!(matches!(
+                materialize_modules(archive, "7.2-test", &modules),
+                Err(InitrdError::ModulesRequireStatic)
+            ));
+        }
+        let dynamic = synth_elf(&[(PT_INTERP, b"/ld.so\0")]);
+        assert!(matches!(
+            materialize_modules(&dynamic, "7.2-test", &modules),
+            Err(InitrdError::DynamicallyLinked(_))
+        ));
+        assert!(checked_entry_size(usize::MAX, 1, 1).is_err());
+        assert!(checked_entry_size(0, usize::MAX, 1).is_err());
+        assert!(checked_entry_size(0, 1, usize::MAX).is_err());
+        assert_eq!(checked_entry_size(0, 4, 3).unwrap(), 120);
+        let collision = [
+            Module {
+                path: std::path::Path::new("a.ko"),
+                bytes: b"x",
+            },
+            Module {
+                path: std::path::Path::new("a.ko"),
+                bytes: b"y",
+            },
+        ];
+        assert!(materialize_modules(&binary, "7.2-test", &collision).is_err());
+    }
+
+    fn inspect_newc(mut bytes: &[u8]) -> std::collections::BTreeMap<String, (Vec<u8>, u32)> {
+        let mut entries = std::collections::BTreeMap::new();
+        loop {
+            let number =
+                |a, b| u32::from_str_radix(std::str::from_utf8(&bytes[a..b]).unwrap(), 16).unwrap();
+            let mode = number(14, 22);
+            assert_eq!(number(22, 30), 0);
+            assert_eq!(number(30, 38), 0);
+            assert_eq!(number(46, 54), 0);
+            let size = number(54, 62) as usize;
+            let namesize = number(94, 102) as usize;
+            let name = std::str::from_utf8(&bytes[110..110 + namesize - 1])
+                .unwrap()
+                .to_string();
+            let start = (110 + namesize + 3) & !3;
+            if name == "TRAILER!!!" {
+                break;
+            }
+            assert!(
+                entries
+                    .insert(name, (bytes[start..start + size].to_vec(), mode))
+                    .is_none()
+            );
+            bytes = &bytes[(start + size + 3) & !3..];
+        }
+        entries
+    }
 
     /// Build a minimal ELF64 little-endian header with the given
     /// program-header table. Used by tests to synthesize static and

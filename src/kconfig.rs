@@ -76,7 +76,41 @@ pub(crate) enum PoweroffSupport {
     Unsupported,
 }
 
+#[derive(Debug, Error)]
+#[error("selected module {path} requires {option}=y")]
+pub(crate) struct ModuleConfigError {
+    path: std::path::PathBuf,
+    option: &'static str,
+}
+
 impl KernelConfig {
+    /// Corium passes compressed module bytes directly to `finit_module`.
+    /// All decompression facilities must therefore be built in, not modules.
+    pub(crate) fn check_module(&self, path: &std::path::Path) -> Result<(), ModuleConfigError> {
+        let require = |option| {
+            if self.is_builtin(option) {
+                Ok(())
+            } else {
+                Err(ModuleConfigError {
+                    path: path.to_owned(),
+                    option,
+                })
+            }
+        };
+        require("CONFIG_MODULES")?;
+        let compression = match path.extension().and_then(|ext| ext.to_str()) {
+            Some("xz") => Some("CONFIG_MODULE_COMPRESS_XZ"),
+            Some("gz") => Some("CONFIG_MODULE_COMPRESS_GZIP"),
+            Some("zst") => Some("CONFIG_MODULE_COMPRESS_ZSTD"),
+            _ => None,
+        };
+        if let Some(option) = compression {
+            require("CONFIG_MODULE_DECOMPRESS")?;
+            require(option)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn parse(text: String) -> Self {
         Self { text }
     }
@@ -299,6 +333,40 @@ pub(crate) fn raise_to_floor(chosen: &str, floor: &str, arch: Arch) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_module_compression_requires_builtin_kernel_support() {
+        let none = KernelConfig::parse(String::new());
+        assert!(none.check_module(std::path::Path::new("test.ko")).is_err());
+        let modules = KernelConfig::parse("CONFIG_MODULES=y\n".to_owned());
+        assert!(
+            modules
+                .check_module(std::path::Path::new("test.ko"))
+                .is_ok()
+        );
+        assert!(
+            modules
+                .check_module(std::path::Path::new("test.ko.zst"))
+                .is_err()
+        );
+        for (suffix, symbol) in [("xz", "XZ"), ("gz", "GZIP"), ("zst", "ZSTD")] {
+            let cfg = KernelConfig::parse(format!(
+                "CONFIG_MODULES=y\nCONFIG_MODULE_DECOMPRESS=y\nCONFIG_MODULE_COMPRESS_{symbol}=y\n"
+            ));
+            assert!(
+                cfg.check_module(std::path::Path::new(&format!("test.ko.{suffix}")))
+                    .is_ok()
+            );
+            let modular = KernelConfig::parse(format!(
+                "CONFIG_MODULES=y\nCONFIG_MODULE_DECOMPRESS=y\nCONFIG_MODULE_COMPRESS_{symbol}=m\n"
+            ));
+            assert!(
+                modular
+                    .check_module(std::path::Path::new(&format!("test.ko.{suffix}")))
+                    .is_err()
+            );
+        }
+    }
 
     fn cfg(s: &str) -> KernelConfig {
         KernelConfig::parse(s.to_string())

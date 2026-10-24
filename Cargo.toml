@@ -39,6 +39,7 @@ ruzstd = "0.9.1"
 zerocopy = { version = "0.8", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
 thiserror = "2"
 
 [dev-dependencies]
@@ -46,6 +47,9 @@ sha2 = "0.11"
 tempfile = "3"
 rstest = "0.28"
 burrow = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+serde_json = "1"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 tatu = { path = "deps/tatu", artifact = "bin", target = "x86_64-unknown-none" }

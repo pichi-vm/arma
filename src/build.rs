@@ -40,6 +40,8 @@ fn load_kernel_config(args: &BuildArgs, kernel: &[u8]) -> Result<kconfig::Kernel
 pub(crate) struct BuildArgs {
     pub(crate) kernel_path: PathBuf,
     pub(crate) initrd_path: Option<PathBuf>,
+    pub(crate) module_names: Vec<String>,
+    pub(crate) module_tree: Option<PathBuf>,
     pub(crate) cmdline: String,
     /// vCPU ISA baseline; `None` ⇒ the per-arch RHEL 9 default (C2).
     pub(crate) profile: Option<String>,
@@ -62,6 +64,15 @@ pub(crate) struct BuildArgs {
 }
 
 pub(crate) fn run(args: &BuildArgs) -> Result<()> {
+    if args.module_tree.is_some() && args.module_names.is_empty() {
+        bail!("--module-tree requires at least one --module selection");
+    }
+    if !args.module_names.is_empty() && args.initrd_path.is_none() {
+        bail!("--module requires a static ELF --initrd");
+    }
+    for name in &args.module_names {
+        crate::modules::validate_name(name)?;
+    }
     // ---- Step 1: read inputs ----
     let kernel_bytes = fs::read(&args.kernel_path)
         .with_context(|| format!("read kernel: {}", args.kernel_path.display()))?;
@@ -149,11 +160,50 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     }
 
     // ---- Step 3: cpio auto-detect / wrap ----
-    let initrd_materialized = initrd_bytes
-        .as_deref()
-        .map(initrd::materialize)
-        .transpose()
-        .context("materialize initrd")?;
+    let initrd_materialized = if args.module_names.is_empty() {
+        initrd_bytes
+            .as_deref()
+            .map(initrd::materialize)
+            .transpose()
+            .context("materialize initrd")?
+    } else {
+        let input = initrd_bytes
+            .as_deref()
+            .context("module options require --initrd")?;
+        initrd::check_module_init(input).context("materialize initrd with modules")?;
+        let release = crate::kernel_release::detect(&kernel_bytes)
+            .context("detect target kernel release for modules")?;
+        let selection =
+            crate::modules::resolve(&release, args.module_tree.as_deref(), &args.module_names)
+                .context("resolve selected modules")?;
+        eprintln!("arma: kernel release: {release}");
+        eprintln!("arma: module tree: {}", selection.tree.display());
+        for name in &selection.builtins {
+            eprintln!("arma: built-in module: {name}");
+        }
+        for file in &selection.files {
+            kcfg.check_module(&file.relative)
+                .context("selected module kernel support")?;
+            let kind = if file.is_root {
+                "selected"
+            } else {
+                "dependency"
+            };
+            eprintln!("arma: {kind} module: {}", file.relative.display());
+        }
+        let files: Vec<_> = selection
+            .files
+            .iter()
+            .map(|file| initrd::Module {
+                path: &file.relative,
+                bytes: &file.bytes,
+            })
+            .collect();
+        Some(std::borrow::Cow::Owned(
+            initrd::materialize_modules(input, &release, &files)
+                .context("materialize initrd with modules")?,
+        ))
+    };
     let initrd_size = initrd_materialized.as_ref().map(|v| v.len() as u64);
 
     // ---- Step 4: select embedded tatu ----

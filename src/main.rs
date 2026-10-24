@@ -21,7 +21,9 @@ mod fs_ext;
 mod initrd;
 mod kconfig;
 mod kernel;
+mod kernel_release;
 mod manifest;
+mod modules;
 mod pe;
 mod planner;
 mod tatu;
@@ -48,7 +50,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Build a PMI from a kernel, optional initrd, and cmdline.
-    Build(BuildArgs),
+    Build(Box<BuildArgs>),
 
     /// Lint a built PMI's guest-physical layout (read-only). Renders the map
     /// (device island, payload, the PCIe BAR window + burned buddy) and flags
@@ -88,6 +90,16 @@ struct BuildArgs {
     /// A static ELF is wrapped in a cpio archive at /init.
     #[arg(long)]
     initrd: Option<PathBuf>,
+
+    /// Module name to include with its hard dependencies when wrapping a static
+    /// ELF init. Repeat to select more modules; aliases/paths are not accepted.
+    #[arg(long = "module", requires = "initrd", value_parser = parse_module_name)]
+    modules: Vec<String>,
+
+    /// Release-specific module directory (not a rootfs). If omitted, discover
+    /// /usr/lib/modules/<target-kernel-release> or /lib/modules/<release>.
+    #[arg(long, requires = "modules")]
+    module_tree: Option<PathBuf>,
 
     /// Kernel command line. Required — arma does not pick defaults
     /// (operator/test-harness chooses; arma is a faithful translator,
@@ -153,6 +165,11 @@ struct BuildArgs {
     output: PathBuf,
 }
 
+fn parse_module_name(value: &str) -> Result<String, String> {
+    modules::validate_name(value).map_err(|e| e.to_string())?;
+    Ok(value.to_owned())
+}
+
 /// Resolve `--dtb` into a channel mode and, for detached mode, the base-DTB
 /// output path. `attached` is the only sentinel; any other value is a path.
 fn resolve_dtb(dtb: Option<String>) -> (build::DtbMode, Option<PathBuf>) {
@@ -169,6 +186,8 @@ impl From<BuildArgs> for build::BuildArgs {
         build::BuildArgs {
             kernel_path: a.kernel,
             initrd_path: a.initrd,
+            module_names: a.modules,
+            module_tree: a.module_tree,
             cmdline: a.cmdline,
             profile: a.profile,
             serial: a.serial,
@@ -187,7 +206,7 @@ impl From<BuildArgs> for build::BuildArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Build(a) => build::run(&a.into()),
+        Command::Build(a) => build::run(&(*a).into()),
         Command::Check(a) => check::run(&a.pmi),
         Command::Cmdline(a) => cmdline::run(&a.dtb, a.cmdline.as_deref()),
     };
