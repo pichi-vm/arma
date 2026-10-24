@@ -189,7 +189,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
             } else {
                 "dependency"
             };
-            eprintln!("arma: {kind} module: {}", file.relative.display());
+            eprintln!("arma: {kind} module: {}", file.posix_relative());
         }
         let files: Vec<_> = selection
             .files

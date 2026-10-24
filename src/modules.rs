@@ -32,6 +32,24 @@ pub(crate) struct ModuleFile {
     pub(crate) is_root: bool,
 }
 
+impl ModuleFile {
+    /// Slash-joined relative path for diagnostics and other POSIX consumers.
+    ///
+    /// `PathBuf` keeps host separators for filesystem work; this method always
+    /// emits `/` so stderr and operator-facing paths match the Linux modules
+    /// tree layout on every host, including Windows.
+    pub(crate) fn posix_relative(&self) -> String {
+        self.relative
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(part) => part.to_str(),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
 /// Resolve against a trusted, read-only module tree. These std filesystem checks
 /// reject symlinks and escapes, but cannot prevent concurrent replacement (TOCTOU).
 /// Both modules.dep and modules.builtin are mandatory; softdep/firmware/indexes
