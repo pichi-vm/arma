@@ -228,8 +228,8 @@ pub(crate) fn materialize_modules(
             let name = dir
                 .to_str()
                 .ok_or_else(|| InitrdError::ModulePath(path.clone()))?;
-            // Archive separators are POSIX even on Windows hosts.
-            directories.insert(name.replace('\\', "/"));
+            // Archive entry names use POSIX separators.
+            directories.insert(name.to_owned());
             parent = dir.parent();
         }
         if let Some(previous) = files.insert(path.clone(), module.bytes)
