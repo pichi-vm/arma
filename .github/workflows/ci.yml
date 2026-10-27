@@ -49,6 +49,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets
 
+  # Fail fast: the OS matrix waits on Tier-1. A header, deny, commit-message,
+  # or lint failure skips ubuntu/macos/windows instead of burning those runners.
   # arma cross-compiles tatu for the host arch's bare-metal target via bindeps,
   # so each OS exercises a different firmware arch: x86_64-unknown-none on Linux
   # and Windows, aarch64-unknown-none on Apple-silicon macOS. Windows also guards
@@ -56,6 +58,7 @@ jobs:
   # real PMIs from real kernels (fetched + cached by burrow).
   test:
     name: build + test (${{ matrix.os }})
+    needs: [license-headers, cargo-deny, commit-messages, lint]
     strategy:
       fail-fast: false
       matrix:
