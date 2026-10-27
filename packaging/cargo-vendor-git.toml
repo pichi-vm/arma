@@ -1,0 +1,17 @@
+# Git crates vendored under vendor/. %cargo_prep -v vendor only redirects
+# crates.io, so the rpm build appends this file to .cargo/config.toml.
+# Regenerate from `cargo vendor --locked --versioned-dirs` when the
+# burrow, devtree, or pmi revision changes. Drop the crates-io and
+# vendored-sources tables; %cargo_prep writes those.
+
+[source."git+https://github.com/pichi-vm/burrow"]
+git = "https://github.com/pichi-vm/burrow"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/devtree"]
+git = "https://github.com/pichi-vm/devtree"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/pmi"]
+git = "https://github.com/pichi-vm/pmi"
+replace-with = "vendored-sources"
