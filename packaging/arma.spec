@@ -64,11 +64,15 @@ ExclusiveArch:  x86_64 aarch64
 %global tatu_target aarch64-unknown-none
 %endif
 
-# Names shared by every chroot. Arch- and distro-specific requires are
-# emitted from %%generate_buildrequires so the SRPM (built on one host)
-# does not bake in that host's arch or Fedora-only packages.
 BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
+
+# Cargo macros must be available before %%prep runs.
+%if 0%{?rhel}
+BuildRequires:  rust-toolset
+%else
+BuildRequires:  cargo-rpm-macros >= 26
+%endif
 
 # Crates linked into the binary. Path members (tatu, dtb2acpi,
 # dtb2e820) are this source tree, not bundled third-party crates.
@@ -143,13 +147,6 @@ grep -q '^offline' .cargo/config.toml || printf '\n[net]\noffline = true\n' >> .
 # ships neither none target, so epel-9 and centos-stream-9 fail here.
 echo "rust-std-static-%{tatu_target}"
 echo "lld"
-%if 0%{?fedora}
-echo "cargo-rpm-macros >= 26"
-%else
-# centos-stream has no EPEL cargo-rpm-macros. rust-toolset in
-# AppStream provides %%cargo_prep / %%cargo_build / %%cargo_install.
-echo "rust-toolset"
-%endif
 
 %build
 export RUSTC_BOOTSTRAP=1
