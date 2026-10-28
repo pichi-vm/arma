@@ -1,2 +1,9 @@
 /target
-/vendor
+/debian/cargo-home
+/debian/none-target
+/debian/none-sysroot
+/debian/arma
+/debian/.debhelper
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars

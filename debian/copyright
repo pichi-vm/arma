@@ -1,0 +1,31 @@
+Arma
+Source: https://github.com/pichi-vm/arma
+Copyright: Advanced Micro Devices, Inc.
+License: Apache-2.0
+
+Arma, including its Debian packaging, is distributed under the Apache
+License, Version 2.0. The full text is shipped in LICENSE and can also be
+found on Debian systems in /usr/share/common-licenses/Apache-2.0.
+
+Bundled Rust crates
+------------------
+The committed vendor directory contains the crates pinned by Cargo.lock and
+the matching distro Rust library workspace's Cargo.lock,
+including pmi, devtree and burrow from their pinned Git revisions. These
+retain their upstream copyrights and licenses. LICENSE.dependencies
+records each crate's name, version, declared license and authors, together
+with the license and notice files supplied by that crate. It is generated
+by debian/refresh-vendor.py and installed alongside this file.
+
+The linked runtime crates use Apache-2.0, MIT, or their declared alternative
+licenses (including 0BSD, BSD-2-Clause, BSD-3-Clause, Unlicense and Zlib).
+The vendor tree also includes build, test and other-platform dependencies;
+their license declarations and supplied notices are recorded there too.
+
+Rust bare-metal libraries
+------------------------
+The build also compiles core and compiler_builtins from the distro rust-src
+package and embeds them in tatu. These retain the Rust project's MIT and
+Apache-2.0 licenses, including the LLVM exception for compiler_builtins.
+Their source and license notices are supplied by the rust-src Build-Depends;
+the distro's Rust copyright file is installed as copyright.rust-src.

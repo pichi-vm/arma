@@ -1,0 +1,89 @@
+Arma host packaging for Ubuntu Resolute
+======================================
+
+The packaging/ubuntu-resolute branch is the source for the Launchpad
+recipe targeting ppa:nmccallum/pichi, resolute only. It contains debian/,
+the crates pinned by Cargo.lock in vendor/, and Cargo's complete
+.cargo/config.toml, including the burrow, devtree and pmi Git redirects.
+LICENSE.dependencies records the bundled crates' licenses and notices.
+
+This branch uses source format 3.0 (native), with version 0.1.0 matching
+Cargo.toml. All sources are in one tree. The recipe does not use an orig
+tarball or make-orig-source. Build the recipe directly from this branch.
+
+After installing Build-Depends, source and binary builds need no network
+or warm Cargo cache. Use /usr/bin/cargo and /usr/bin/rustc on PATH rather
+than rustup shims; rust-toolchain.toml pins upstream's development nightly.
+From a checkout of this branch, run:
+
+    dpkg-buildpackage -S -us -uc
+    dpkg-buildpackage -b -us -uc
+
+For a clean Resolute build with a locally configured sbuild chroot:
+
+    sbuild --dist=resolute ../arma_0.1.0.dsc
+
+Bare-metal libraries and linker
+-------------------------------
+
+Resolute's main and universe package indexes were checked on 28 October
+2026 using apt-cache. They offer libstd-rust-dev and libstd-rust-1.93-dev,
+but no Rust bare-metal library packages. Inspection of the amd64 and arm64
+libstd-rust-1.93-dev debs (1.93.1+dfsg-0ubuntu6) found only their respective
+Linux target libraries, with neither required none target. Therefore this
+branch uses cargo, rustc and rust-src >= 1.93 plus lld. Resolute's default
+Rust is 1.93.1; use matching compiler and source packages. This is above
+arma's 1.88 MSRV to match the distro toolchain and its build-std sources.
+
+Native amd64 builds compile tatu for x86_64-unknown-none. Native arm64
+builds compile it for aarch64-unknown-none-softfloat, matching Cargo.toml
+and rust-toolchain.toml. The arm64 boot stub must use the softfloat ABI.
+Builds are intended for native amd64 and arm64 builders; cross package
+builds are rejected.
+
+During every binary build debian/rules runs Cargo -Z build-std=core for
+tatu with --offline --locked, compiling core and compiler_builtins from
+the installed rust-src. It copies those rlibs into debian/none-sysroot and
+passes --sysroot through the selected bare-metal target's RUSTFLAGS.
+The subsequent cargo build --offline --locked --release --bin arma
+compiles tatu as arma's artifact dependency and embeds it in /usr/bin/arma,
+using the private sysroot for tatu and the distro Linux libraries for arma.
+Nothing is written into /usr or rust-src. Ubuntu's lld supplies ld.lld.
+No clang or compiler-rt C sources are needed by this core-only build.
+The distro Rust copyright file is installed as copyright.rust-src.
+
+Both Cargo invocations use private debian/cargo-home and target directories,
+CARGO_NET_OFFLINE=true and --offline --locked. RUSTC_BOOTSTRAP=1 enables
+bindeps and build-std on distro Rust without downloading a nightly.
+Global RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS are unset because they take
+precedence over the target-specific sysroot flags. Rust flags supplied by
+dpkg-buildflags apply only to the Linux host target.
+
+The clean target removes build output and the private Cargo home and
+sysroot. dh_clean excludes vendor/ to preserve checksummed Cargo.toml.orig
+files. Package integration tests are skipped because they need burrow,
+kernels and network access. Upstream validation still applies before merge.
+
+Refreshing dependencies
+-----------------------
+
+On a networked Resolute machine, install Python >= 3.11 and matching cargo,
+rustc and rust-src packages. Use the distro tools on PATH, update Cargo.lock
+deliberately if needed, then run:
+
+    python3 debian/refresh-vendor.py
+
+The helper runs cargo vendor --locked --versioned-dirs vendor with --sync
+for the installed rust-src library workspace. This also vendors dependencies
+needed to resolve build-std, even though only core and compiler_builtins
+are compiled. It writes .cargo/rust-src.lock, merges the generated crates.io
+and Git source redirects with [unstable] bindeps = true and [net] offline =
+true, and regenerates LICENSE.dependencies from manifests and supplied
+license and notice files. It does not create an orig tarball.
+
+The package build compares .cargo/rust-src.lock with the installed library
+lockfile and fails before compilation if they differ. When rust-src changes,
+refresh vendor and the source lock together on this branch. Review and
+commit vendor/, Cargo.lock, .cargo/config.toml, .cargo/rust-src.lock and
+LICENSE.dependencies together. Review upstream changes before updating
+this packaging branch. Archive setup and recipe wiring are handled by Infra.
