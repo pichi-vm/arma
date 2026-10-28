@@ -1,0 +1,80 @@
+Arma host packaging for Ubuntu Resolute
+======================================
+
+Prepare sources on a networked Resolute machine with Git, Python >= 3.12,
+GNU tar, xz, and the distro cargo, rustc and matching rust-src packages.
+Use /usr/bin/cargo and /usr/bin/rustc on PATH rather than rustup shims:
+upstream rust-toolchain.toml pins a development nightly. From this checkout:
+
+    python3 debian/make-orig-source.py ../arma-deb-source
+    cd ../arma-deb-source/arma-0.1.0
+    dpkg-buildpackage -S -us -uc
+
+The helper exports committed HEAD (excluding debian/), runs cargo vendor
+--locked --versioned-dirs with RUSTC_BOOTSTRAP=1 for artifact dependencies,
+and creates arma_0.1.0.orig.tar.xz plus a build tree with the checkout's
+debian/ copied in. Use a fresh output directory. Commit upstream changes
+before preparing sources; debian/ may be edited without regenerating the
+orig tarball. Reuse the same orig tarball for subsequent Debian revisions
+of this upstream version, provided the rust-src dependency lock is unchanged.
+
+Vendoring also uses --sync with the installed rust-src library/Cargo.toml.
+This includes dependencies needed to resolve Cargo's build-std workspace,
+even though the binary build only compiles core and compiler_builtins.
+.cargo/rust-src.lock records that workspace's lockfile. debian/rules checks
+it against the installed rust-src before building. If the Rust source lock
+changes, regenerate the orig tarball and use a new upstream source version
+before publishing; never silently replace an already published orig tarball.
+Keep rustc and rust-src from the same distro toolchain installed together.
+
+The orig tarball contains vendor/, Cargo's complete .cargo/config.toml
+(including the pmi, devtree and burrow Git source redirects), bindeps and
+offline settings, and generated LICENSE.dependencies. No vendor sources
+are committed to Git. Archive ordering, timestamps, owners and modes are
+normalized. Keep upstream Cargo.lock unchanged; registry checksums and Git
+revisions come from it and the Rust library lockfile. Debian does not use
+the RPM-specific packaging/cargo-vendor-git.toml fragment.
+
+After installing Build-Depends, binary builds require no network, rustup,
+prebuilt bare-metal libraries or warm Cargo cache:
+
+    dpkg-buildpackage -b -us -uc
+
+For a clean Resolute build with a locally configured sbuild chroot:
+
+    sbuild --dist=resolute ../arma_0.1.0-1.dsc
+
+Bare-metal libraries and linker
+-------------------------------
+
+Resolute has no prebuilt *-unknown-none Rust library packages. Native amd64
+builds need x86_64-unknown-none; native arm64 builds need aarch64-unknown-none.
+During every binary build debian/rules first runs Cargo -Z build-std=core
+for tatu with --offline --locked, compiling core and compiler_builtins from
+the installed rust-src. It copies those rlibs into debian/none-sysroot and
+passes --sysroot only through the selected bare-metal target's RUSTFLAGS.
+The subsequent host build compiles tatu as arma's artifact dependency and
+embeds it in /usr/bin/arma, using the private sysroot for tatu and the distro
+Linux standard library for arma. Nothing is written into /usr or rust-src.
+Global RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS are unset because Cargo gives
+them precedence over the target-specific sysroot flags. Distro Rust flags
+from dpkg-buildflags are applied only to the Linux host target instead.
+Ubuntu's lld package supplies ld.lld, selected for the bare-metal target.
+No clang or compiler-rt C sources are needed by this core-only build.
+The distro Rust source copyright notices are installed as copyright.rust-src.
+
+Both Cargo invocations use a private, initially empty debian/cargo-home,
+CARGO_NET_OFFLINE=true and --offline --locked. RUSTC_BOOTSTRAP=1 enables
+Cargo's unstable bindeps and build-std support on distro Rust. This is
+required by tatu's artifact dependency; it does not download a nightly.
+The bootstrap and private sysroot are removed by the package clean target.
+dh_clean excludes vendor/ to preserve checksummed Cargo.toml.orig files.
+Package integration tests are disabled because they need burrow, kernels
+and network access.
+
+Cargo feature reference:
+  https://doc.rust-lang.org/cargo/reference/unstable.html#build-std
+  https://doc.rust-lang.org/cargo/reference/unstable.html#artifact-dependencies
+
+Target archive: ppa:nmccallum/pichi, resolute only. These commands prepare
+and build local packages; archive creation and uploads are handled by Infra.

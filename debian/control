@@ -1,0 +1,16 @@
+Source: arma
+Section: admin
+Priority: optional
+Maintainer: Nathaniel McCallum <nathaniel@mccallum.life>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.93), rustc (>= 1.93), rust-src (>= 1.93), lld
+Standards-Version: 4.7.2
+Homepage: https://github.com/pichi-vm/arma
+Rules-Requires-Root: no
+
+Package: arma
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Portable Machine Image builder for pichi-vm
+ Arma builds a Portable Machine Image from a kernel, optional initrd and
+ command line. The tatu bare-metal boot stub is compiled with arma and
+ embedded in the host binary installed at /usr/bin/arma.

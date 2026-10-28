@@ -1,0 +1,64 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_NET_OFFLINE = true
+export CARGO_TARGET_DIR = $(CURDIR)/target
+export RUSTC_BOOTSTRAP = 1
+# Global Rust flags override target flags, including the private sysroot.
+unexport RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+HOST_RUSTFLAGS := $(shell dpkg-buildflags --get RUSTFLAGS)
+RUST_LIBRARY := $(shell rustc --print sysroot)/lib/rustlib/src/rust/library
+RUST_SERIES := $(shell rustc --version | cut -d' ' -f2 | cut -d. -f1,2)
+NONE_SYSROOT = $(CURDIR)/debian/none-sysroot
+
+DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+DEB_BUILD_ARCH ?= $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+ifeq ($(DEB_HOST_ARCH),amd64)
+TATU_TARGET = x86_64-unknown-none
+export CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER = ld.lld
+TATU_RUSTFLAGS = CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = $(HOST_RUSTFLAGS)
+else ifeq ($(DEB_HOST_ARCH),arm64)
+TATU_TARGET = aarch64-unknown-none
+export CARGO_TARGET_AARCH64_UNKNOWN_NONE_LINKER = ld.lld
+TATU_RUSTFLAGS = CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = $(HOST_RUSTFLAGS)
+endif
+
+.PHONY: override_dh_auto_build override_dh_auto_test \
+        override_dh_auto_install override_dh_auto_clean override_dh_clean
+
+%:
+	dh $@ --buildsystem=none
+
+override_dh_auto_build:
+	@test -n "$(TATU_TARGET)" || { echo "arma supports native amd64 and arm64 builds only" >&2; exit 1; }
+	@test "$(DEB_HOST_ARCH)" = "$(DEB_BUILD_ARCH)" || { echo "arma requires a native build" >&2; exit 1; }
+	@test -d vendor && test -f .cargo/config.toml || { echo "Run debian/make-orig-source.py before building" >&2; exit 1; }
+	@cmp -s .cargo/rust-src.lock "$(RUST_LIBRARY)/Cargo.lock" || \
+	 { echo "rust-src differs from the vendored toolchain; regenerate the orig tarball (see debian/README.source)" >&2; exit 1; }
+	rm -rf debian/none-target "$(NONE_SYSROOT)"
+	# Bootstrap only the bare-metal target; keep the distro host std intact.
+	CARGO_TARGET_DIR=$(CURDIR)/debian/none-target cargo -Z build-std=core build \
+		--offline --locked --release -p tatu --target $(TATU_TARGET)
+	install -d "$(NONE_SYSROOT)/lib/rustlib/$(TATU_TARGET)/lib"
+	install -m644 debian/none-target/$(TATU_TARGET)/release/deps/libcore-*.rlib \
+		debian/none-target/$(TATU_TARGET)/release/deps/libcompiler_builtins-*.rlib \
+		"$(NONE_SYSROOT)/lib/rustlib/$(TATU_TARGET)/lib/"
+	$(TATU_RUSTFLAGS)="--sysroot=$(NONE_SYSROOT) -C linker=ld.lld" \
+		cargo build --offline --locked --release --bin arma
+
+# Integration tests need burrow, kernels and network access.
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -Dm755 target/release/arma debian/arma/usr/bin/arma
+	install -Dm644 /usr/share/doc/rust-$(RUST_SERIES)-src/copyright \
+		debian/arma/usr/share/doc/arma/copyright.rust-src
+
+override_dh_auto_clean:
+	rm -rf target debian/cargo-home debian/none-target debian/none-sysroot
+
+# Cargo checksums cover upstream Cargo.toml.orig files inside vendor/.
+override_dh_clean:
+	dh_clean -Xvendor/
