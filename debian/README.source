@@ -87,3 +87,23 @@ refresh vendor and the source lock together on this branch. Review and
 commit vendor/, Cargo.lock, .cargo/config.toml, .cargo/rust-src.lock and
 LICENSE.dependencies together. Review upstream changes before updating
 this packaging branch. Archive setup and recipe wiring are handled by Infra.
+
+Local validation
+----------------
+
+On 28 October 2026, an offline release build passed on Fedora 44 with the
+pinned upstream nightly and an initially empty private Cargo home. The
+arm64 softfloat tatu build also passed with that toolchain.
+
+A Resolute amd64 base under rootless proot passed dpkg-buildpackage -S
+and -b using the distro Rust 1.93.1 toolchain, matching rust-src and lld.
+The binary build passed with invalid global Rust flags supplied to verify
+that the rules remove them before Cargo runs. Validation used packaged
+GNU coreutils for compatibility with proot. All vendored crate checksums
+were checked, including after the package clean target.
+
+The Resolute toolchain also built tatu for aarch64-unknown-none-softfloat
+offline, first with build-std=core and then with the copied private sysroot.
+The arm64 rules were checked with a dry run. A full sbuild and a native
+arm64 binary package build were not run. Package integration tests were
+skipped for the reasons above.
