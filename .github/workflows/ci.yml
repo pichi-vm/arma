@@ -82,9 +82,9 @@ jobs:
   # or lint failure skips ubuntu/macos/windows instead of burning those runners.
   # arma cross-compiles tatu for the host arch's bare-metal target via bindeps,
   # so each OS exercises a different firmware arch: x86_64-unknown-none on Linux
-  # and Windows, aarch64-unknown-none on Apple-silicon macOS. Windows also guards
-  # PE emission on a Windows host (arma's output is a PE). The image tests build
-  # real PMIs from real kernels (fetched + cached by burrow).
+  # and Windows, aarch64-unknown-none-softfloat on Apple-silicon macOS. Windows
+  # also guards PE emission on a Windows host (arma's output is a PE). The image
+  # tests build real PMIs from real kernels (fetched + cached by burrow).
   test:
     name: build + test (${{ matrix.os }})
     needs: [license-headers, cargo-deny, commit-messages, lint]
