@@ -149,14 +149,15 @@ echo "rust-std-static-%{tatu_target}"
 echo "lld"
 
 %build
+# Use -- to pass Cargo flags through the RPM macros.
 export RUSTC_BOOTSTRAP=1
 export CARGO_NET_OFFLINE=true
-%cargo_build --locked
+%cargo_build -- --locked
 
 %install
 export RUSTC_BOOTSTRAP=1
 export CARGO_NET_OFFLINE=true
-%cargo_install --locked
+%cargo_install -- --locked
 
 # Tests fetch kernels through burrow. Copr %%build has no network.
 %if %{with check}
