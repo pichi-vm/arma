@@ -1,10 +1,22 @@
-# Copr "make srpm" entry point. Source0 is this git tree. Source1 is a
-# vendor tarball produced here. vendor/ is not committed.
+# Copr make_srpm entry point. Copr cds into the clone and runs
+# `make -f .copr/Makefile srpm` with spec= and outdir=.
+#
+# make_srpm has no chroot package list in the Copr UI, so this
+# target installs what it needs with dnf (cargo, rust, rpm-build,
+# tar, xz, gzip). Do not require git: Copr already provides the
+# tree as cwd. Override DNF (e.g. DNF=true) when the host already
+# has those tools, such as GitHub Actions with apt + rustup.
+#
+# Source0 is this tree tarball. Source1 is a vendor tarball
+# produced here. vendor/ is not committed. RUSTC_BOOTSTRAP=1
+# lets cargo vendor accept [unstable] bindeps.
 SHELL := /bin/bash
+DNF ?= dnf
 
 srpm:
+	$(DNF) -y install cargo rust rpm-build tar xz gzip
 	set -euo pipefail; \
-	root=$$(git rev-parse --show-toplevel); \
+	root=$$(pwd); \
 	workdir=$$(mktemp -d); \
 	trap 'rm -rf "$$workdir"' EXIT; \
 	version=$$(awk '/^Version:/ { print $$2; exit }' "$(spec)"); \
