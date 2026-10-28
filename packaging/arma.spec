@@ -163,7 +163,7 @@ export CARGO_NET_OFFLINE=true
 %if %{with check}
 %check
 export RUSTC_BOOTSTRAP=1
-%cargo_test
+%cargo_test -- --locked
 %endif
 
 %files
