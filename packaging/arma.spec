@@ -174,5 +174,5 @@ export RUSTC_BOOTSTRAP=1
 %{_bindir}/arma
 
 %changelog
-* Tue Oct 27 2026 Pichi VM - 0.1.0-1
+* Tue Oct 27 2026 Nathaniel McCallum <nathaniel@mccallum.life> - 0.1.0-1
 - Initial host package for Copr.
