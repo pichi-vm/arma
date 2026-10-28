@@ -1,4 +1,27 @@
-# arma embeds the bare-metal `tatu` binary via a cargo artifact dependency
-# (`artifact = "bin"`), which is still unstable, so the build needs `-Z bindeps`.
+# Git revisions pinned by Cargo.lock:
+# git+https://github.com/pichi-vm/burrow#9f8c55884ae960d5764738fe6a00cec2a01d07f7
+# git+https://github.com/pichi-vm/devtree#e90bafce9ee9e4f7f570f07c5c242b6398c64980
+# git+https://github.com/pichi-vm/pmi#5a5b02a799476df95abcf95ad40fe88298464257
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/burrow"]
+git = "https://github.com/pichi-vm/burrow"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/devtree"]
+git = "https://github.com/pichi-vm/devtree"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/pichi-vm/pmi"]
+git = "https://github.com/pichi-vm/pmi"
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
 [unstable]
 bindeps = true
+
+[net]
+offline = true
