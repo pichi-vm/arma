@@ -1,4 +1,4 @@
-# Hand-tuned Fedora cargo spec for this workspace.
+# Hand-tuned Fedora cargo spec for this workspace. Copr is Fedora-only.
 #
 # Copr SCM method is make_srpm. .copr/Makefile builds the SRPM:
 # it vendors crates (network is allowed then), packs this git
@@ -13,8 +13,9 @@
 # ("bindeps") are still unstable, so %%build exports
 # RUSTC_BOOTSTRAP=1, which makes cargo accept the [unstable]
 # table. cargo-rpm-macros 28 already does this for
-# -Z avoid-dev-deps; rust-toolset on EL does not, so set it
-# here too.
+# -Z avoid-dev-deps; set it explicitly for bindeps too.
+# Fedora supplies tatu's bare-metal std packages, including
+# aarch64-unknown-none-softfloat, so no std rebuild is needed.
 #
 # %%build_rustflags normally add an RPM package note via
 # -Clink-arg=-Wl,-dT,.... rust-lld rejects -Wl while linking
@@ -27,8 +28,8 @@
 # when the burrow, devtree, or pmi revision changes. Keep
 # only the git [source.*] tables. %%cargo_prep also deletes
 # .cargo/, so [unstable] bindeps is written again here.
-# Fedora cargo-rpm-macros already set [net] offline; EL
-# rust-toolset macros do not, so add it only when missing.
+# Fedora cargo-rpm-macros already set [net] offline; add it
+# only when missing.
 
 %bcond_with check
 
@@ -61,7 +62,7 @@ ExclusiveArch:  x86_64 aarch64
 %global tatu_target x86_64-unknown-none
 %endif
 %ifarch aarch64
-%global tatu_target aarch64-unknown-none
+%global tatu_target aarch64-unknown-none-softfloat
 %endif
 
 BuildRequires:  rust >= 1.88
@@ -141,10 +142,8 @@ EOF
 grep -q '^offline' .cargo/config.toml || printf '\n[net]\noffline = true\n' >> .cargo/config.toml
 
 %generate_buildrequires
-# Prebuilt core for the bare-metal tatu target. Fedora and RHEL >= 10
-# ship rust-std-static-x86_64-unknown-none. They ship
-# aarch64-unknown-none-softfloat, not aarch64-unknown-none. RHEL 9
-# ships neither none target, so epel-9 and centos-stream-9 fail here.
+# Fedora supplies prebuilt core for both bare-metal tatu targets:
+# x86_64-unknown-none and aarch64-unknown-none-softfloat.
 echo "rust-std-static-%{tatu_target}"
 echo "lld"
 

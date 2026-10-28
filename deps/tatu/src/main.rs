@@ -86,7 +86,7 @@ fn main() {
     eprintln!(
         "tatu is a bare-metal binary. Build with:\n\
          \tcargo build --release --target x86_64-unknown-none\n\
-         \tcargo build --release --target aarch64-unknown-none"
+         \tcargo build --release --target aarch64-unknown-none-softfloat"
     );
     std::process::exit(2);
 }
