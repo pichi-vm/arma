@@ -11,10 +11,10 @@
 #
 # Distro cargo is the stable channel. Artifact dependencies
 # ("bindeps") are still unstable, so %%build exports
-# RUSTC_BOOTSTRAP=1, which makes cargo accept the [unstable]
-# table. cargo-rpm-macros 28 already does this for
-# -Z avoid-dev-deps; rust-toolset on EL does not, so set it
-# here too.
+# RUSTC_BOOTSTRAP=1 for bindeps and -Z build-std=core.
+# Build bare-metal core from rust-src on both arches: EL9 has
+# no none-target std package, and aarch64 packages use the
+# incompatible aarch64-unknown-none-softfloat target.
 #
 # %%build_rustflags normally add an RPM package note via
 # -Clink-arg=-Wl,-dT,.... rust-lld rejects -Wl while linking
@@ -43,7 +43,7 @@
 
 Name:           arma
 Version:        0.1.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        PMI builder for pichi-vm
 
 # Linked crates are Apache-2.0, MIT, or a dual license that offers one
@@ -66,6 +66,8 @@ ExclusiveArch:  x86_64 aarch64
 
 BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
+BuildRequires:  rust-src
+BuildRequires:  lld
 
 # Cargo macros must be available before %%prep runs.
 %if 0%{?rhel}
@@ -140,30 +142,61 @@ bindeps = true
 EOF
 grep -q '^offline' .cargo/config.toml || printf '\n[net]\noffline = true\n' >> .cargo/config.toml
 
-%generate_buildrequires
-# Prebuilt core for the bare-metal tatu target. Fedora and RHEL >= 10
-# ship rust-std-static-x86_64-unknown-none. They ship
-# aarch64-unknown-none-softfloat, not aarch64-unknown-none. RHEL 9
-# ships neither none target, so epel-9 and centos-stream-9 fail here.
-echo "rust-std-static-%{tatu_target}"
-echo "lld"
-
 %build
-# Use -- to pass Cargo flags through the RPM macros.
 export RUSTC_BOOTSTRAP=1
 export CARGO_NET_OFFLINE=true
-%cargo_build -- --locked
+export CARGO_HOME="$PWD/.cargo"
+export CARGO_TARGET_DIR="$PWD/target"
+# Global flags from %%cargo_build override target-specific sysroots.
+# Use Cargo directly and keep RPM flags on the host target only.
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+host=$(%{__rustc} -vV | sed -n 's/^host: //p')
+rust_library=$(%{__rustc} --print sysroot)/lib/rustlib/src/rust/library
+test -f "$rust_library/Cargo.lock"
+test -d "$rust_library/vendor"
+cat >> .cargo/config.toml << EOF
+
+[target.$host]
+rustflags = "%{build_rustflags}"
+
+[target.%{tatu_target}]
+linker = "ld.lld"
+EOF
+
+# rust-src carries its own locked dependencies. Combine sources without
+# changing the SRPM vendor tree or tying it to the SRPM host's toolchain.
+mkdir -p .cargo/none-vendor
+for crate in "$PWD"/vendor/* "$rust_library"/vendor/*; do
+    dest=".cargo/none-vendor/${crate##*/}"
+    test -e "$dest" || ln -s "$crate" "$dest"
+done
+CARGO_TARGET_DIR="$PWD/.cargo/none-target" /usr/bin/cargo \
+    -Z build-std=core build --offline --locked --release -p tatu \
+    --target %{tatu_target} \
+    --config "source.vendored-sources.directory=\"$PWD/.cargo/none-vendor\""
+install -d .cargo/none-sysroot/lib/rustlib/%{tatu_target}/lib
+install -m644 \
+    .cargo/none-target/%{tatu_target}/release/deps/libcore-*.rlib \
+    .cargo/none-target/%{tatu_target}/release/deps/libcompiler_builtins-*.rlib \
+    .cargo/none-sysroot/lib/rustlib/%{tatu_target}/lib/
+# This continues the bare-metal target table above. Host std stays intact.
+cat >> .cargo/config.toml << EOF
+rustflags = "--sysroot=$PWD/.cargo/none-sysroot"
+EOF
+/usr/bin/cargo build --offline --locked --release --bin arma
 
 %install
-export RUSTC_BOOTSTRAP=1
-export CARGO_NET_OFFLINE=true
-%cargo_install -- --locked
+install -Dm755 target/release/arma %{buildroot}%{_bindir}/arma
 
 # Tests fetch kernels through burrow. Copr %%build has no network.
 %if %{with check}
 %check
 export RUSTC_BOOTSTRAP=1
-%cargo_test -- --locked
+export CARGO_NET_OFFLINE=true
+export CARGO_HOME="$PWD/.cargo"
+export CARGO_TARGET_DIR="$PWD/target"
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+/usr/bin/cargo test --offline --locked --release
 %endif
 
 %files
@@ -172,5 +205,8 @@ export RUSTC_BOOTSTRAP=1
 %{_bindir}/arma
 
 %changelog
+* Wed Oct 28 2026 Nathaniel McCallum <nathaniel@mccallum.life> - 0.1.0-2
+- Build bare-metal core offline from rust-src for all supported arches.
+
 * Tue Oct 27 2026 Nathaniel McCallum <nathaniel@mccallum.life> - 0.1.0-1
 - Initial host package for Copr.
