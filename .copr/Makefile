@@ -8,8 +8,9 @@
 # has those tools, such as GitHub Actions with apt + rustup.
 #
 # Source0 is this tree tarball. Source1 is a vendor tarball
-# produced here. vendor/ is not committed. RUSTC_BOOTSTRAP=1
-# lets cargo vendor accept [unstable] bindeps.
+# produced here. RUSTC_BOOTSTRAP=1 lets cargo vendor accept
+# unstable bindeps. Enable it and network access explicitly
+# so vendoring does not depend on the checkout's .cargo config.
 SHELL := /bin/bash
 DNF ?= dnf
 
@@ -23,12 +24,14 @@ srpm:
 	name=$$(awk '/^Name:/ { print $$2; exit }' "$(spec)"); \
 	mkdir -p "$(outdir)"; \
 	cd "$$root"; \
-	RUSTC_BOOTSTRAP=1 cargo vendor --locked --versioned-dirs "$$workdir/vendor" \
+	RUSTC_BOOTSTRAP=1 cargo --config 'unstable.bindeps=true' \
+		--config 'net.offline=false' vendor --locked --versioned-dirs "$$workdir/vendor" \
 		>/dev/null; \
 	tar -C "$$root" -czf "$$workdir/$$name-$$version.tar.gz" \
 		--exclude-vcs \
 		--exclude target \
 		--exclude vendor \
+		--exclude .cargo \
 		--transform "s,^\./,$$name-$$version/," \
 		.; \
 	tar -C "$$workdir" -cJf "$$workdir/$$name-$$version-vendor.tar.xz" vendor; \
