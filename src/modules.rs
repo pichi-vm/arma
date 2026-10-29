@@ -32,6 +32,84 @@ pub(crate) struct ModuleFile {
     pub(crate) is_root: bool,
 }
 
+/// The kernel either accepts the original bytes or needs a plain `.ko` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModulePacking {
+    Keep,
+    Gzip,
+    Xz,
+    Zstd,
+}
+
+impl ModulePacking {
+    // Large enough for modules with debug information, but bounded independently
+    // of the compressed size and any untrusted size stored in the stream.
+    const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
+
+    pub(crate) fn pack(self, file: &mut ModuleFile) -> Result<(), ModuleError> {
+        self.pack_with_limit(file, Self::MAX_DECOMPRESSED_SIZE)
+    }
+
+    fn pack_with_limit(self, file: &mut ModuleFile, limit: usize) -> Result<(), ModuleError> {
+        if self == Self::Keep {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        let result = match self {
+            Self::Keep => unreachable!(),
+            Self::Gzip => Self::read_bounded(
+                flate2::read::MultiGzDecoder::new(file.bytes.as_slice()),
+                &mut bytes,
+                limit,
+            ),
+            Self::Xz => Self::read_bounded(
+                lzma_rust2::XzReader::new_mem_limit(file.bytes.as_slice(), true, 64 * 1024),
+                &mut bytes,
+                limit,
+            ),
+            Self::Zstd => {
+                // A zstd file can contain multiple frames. Apply the output
+                // budget to their combined size, not separately to each frame.
+                let mut input = file.bytes.as_slice();
+                let mut result;
+                loop {
+                    result = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
+                        &mut input,
+                        Self::MAX_DECOMPRESSED_SIZE as u64,
+                    )
+                    .map_err(std::io::Error::other)
+                    .and_then(|decoder| Self::read_bounded(decoder, &mut bytes, limit));
+                    if input.is_empty() || result.is_err() {
+                        break;
+                    }
+                }
+                result
+            }
+        };
+        result.map_err(|error| {
+            ModuleError(format!(
+                "decompress selected module {}: {error}",
+                file.posix_relative()
+            ))
+        })?;
+        file.relative.set_extension("");
+        file.bytes = bytes;
+        Ok(())
+    }
+
+    fn read_bounded(decoder: impl Read, bytes: &mut Vec<u8>, limit: usize) -> std::io::Result<()> {
+        decoder
+            .take((limit - bytes.len()) as u64 + 1)
+            .read_to_end(bytes)?;
+        if bytes.len() > limit {
+            return Err(std::io::Error::other(format!(
+                "decompressed module exceeds size limit of {limit} bytes"
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl ModuleFile {
     /// Slash-joined relative path for diagnostics and other POSIX consumers.
     ///
@@ -326,6 +404,131 @@ fn closure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PAYLOAD: &[u8] = b"\0module payload\xff\n";
+    const COMPRESSED: [(ModulePacking, &str, &[u8]); 3] = [
+        (
+            ModulePacking::Gzip,
+            "gz",
+            include_bytes!("../tests/data/module.ko.gz"),
+        ),
+        (
+            ModulePacking::Xz,
+            "xz",
+            include_bytes!("../tests/data/module.ko.xz"),
+        ),
+        (
+            ModulePacking::Zstd,
+            "zst",
+            include_bytes!("../tests/data/module.ko.zst"),
+        ),
+    ];
+
+    #[test]
+    fn packing_preserves_or_decompresses_each_format() {
+        for (packing, suffix, compressed) in COMPRESSED {
+            let mut file = ModuleFile {
+                relative: format!("kernel/test.ko.{suffix}").into(),
+                bytes: compressed.into(),
+                is_root: true,
+            };
+            ModulePacking::Keep.pack(&mut file).unwrap();
+            assert_eq!(file.bytes, compressed);
+            assert_eq!(
+                file.relative,
+                PathBuf::from(format!("kernel/test.ko.{suffix}"))
+            );
+            packing.pack(&mut file).unwrap();
+            assert_eq!(file.bytes, PAYLOAD);
+            assert_eq!(file.relative, Path::new("kernel/test.ko"));
+            assert!(file.is_root);
+        }
+    }
+
+    #[test]
+    fn decompression_limits_include_concatenated_streams() {
+        for (packing, suffix, compressed) in COMPRESSED {
+            for copies in [1, 2] {
+                let mut file = ModuleFile {
+                    relative: format!("kernel/test.ko.{suffix}").into(),
+                    bytes: compressed.repeat(copies),
+                    is_root: false,
+                };
+                let limit = PAYLOAD.len() * copies;
+                let error = packing.pack_with_limit(&mut file, limit - 1).unwrap_err();
+                assert!(error.to_string().contains("size limit"), "{error}");
+                assert!(error.to_string().contains(&file.posix_relative()));
+                // Failed packing leaves the source name and bytes intact.
+                assert_eq!(file.bytes, compressed.repeat(copies));
+                assert!(file.relative.extension().is_some_and(|ext| ext == suffix));
+                packing.pack_with_limit(&mut file, limit).unwrap();
+                assert_eq!(file.bytes, PAYLOAD.repeat(copies));
+            }
+        }
+    }
+
+    #[test]
+    fn production_decompression_limit_is_enforced() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::copy(
+            &mut std::io::repeat(0).take(ModulePacking::MAX_DECOMPRESSED_SIZE as u64 + 1),
+            &mut encoder,
+        )
+        .unwrap();
+        let mut file = ModuleFile {
+            relative: "large.ko.gz".into(),
+            bytes: encoder.finish().unwrap(),
+            is_root: false,
+        };
+        let error = ModulePacking::Gzip.pack(&mut file).unwrap_err();
+        assert!(error.to_string().contains("size limit of 67108864 bytes"));
+    }
+
+    #[test]
+    fn oversized_decoder_dictionaries_are_rejected() {
+        let mut xz = COMPRESSED[1].2.to_vec();
+        // Advertise a 128 MiB LZMA2 dictionary and repair the block header CRC.
+        xz[16] = 30;
+        let mut crc = flate2::Crc::new();
+        crc.update(&xz[12..20]);
+        xz[20..24].copy_from_slice(&crc.sum().to_le_bytes());
+        let mut zstd = COMPRESSED[2].2.to_vec();
+        // Advertise a 128 MiB window in this non-single-segment frame.
+        zstd[5] = 0x88;
+        for (packing, path, bytes, expected) in [
+            (ModulePacking::Xz, "test.ko.xz", xz, "mem_limit"),
+            (ModulePacking::Zstd, "test.ko.zst", zstd, "window"),
+        ] {
+            let mut file = ModuleFile {
+                relative: path.into(),
+                bytes,
+                is_root: false,
+            };
+            let error = packing.pack(&mut file).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(error.to_string().contains(path));
+        }
+    }
+
+    #[test]
+    fn malformed_compressed_modules_fail_only_when_unpacked() {
+        for (packing, suffix, compressed) in COMPRESSED {
+            for bytes in [
+                vec![],
+                b"invalid".to_vec(),
+                compressed[..compressed.len() - 1].to_vec(),
+            ] {
+                let mut file = ModuleFile {
+                    relative: format!("test.ko.{suffix}").into(),
+                    bytes,
+                    is_root: false,
+                };
+                ModulePacking::Keep.pack(&mut file).unwrap();
+                let error = packing.pack(&mut file).unwrap_err();
+                assert!(error.to_string().contains("decompress selected module"));
+            }
+        }
+    }
 
     fn fixture(dep: &str, builtin: &str, files: &[&str]) -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
