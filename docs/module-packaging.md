@@ -62,8 +62,8 @@ name; its basename is not used as evidence of the target release or module ABI.
 Accept only regular `.ko`, `.ko.xz`, `.ko.gz`, and `.ko.zst` module files.
 Reject file symlinks, traversal, special files and dependencies escaping
 the canonical module tree. Default discovery may follow the normal
-`/lib` to `/usr/lib` directory alias. Preserve module bytes and relative
-subdirectories under `usr/lib/modules/<exact-release>/`. The source is a trusted,
+`/lib` to `/usr/lib` directory alias. Preserve relative subdirectories under
+`usr/lib/modules/<exact-release>/`. The source is a trusted,
 read-only tree for the duration of the build. Standard filesystem checks reject
 existing symlinks and escapes but are not an atomic sandbox against concurrent
 malicious replacement of files or directories.
@@ -76,11 +76,19 @@ files without reading those indexes. Print the target release, chosen
 source tree, built-in selections, and included files, distinguishing roots
 from dependencies.
 
-Require `CONFIG_MODULES=y` for loadable payloads. Preserve compressed files
-only when `CONFIG_MODULE_DECOMPRESS=y` and the matching
-`CONFIG_MODULE_COMPRESS_XZ`, `GZIP`, or `ZSTD` option is enabled. Do not
-silently decompress or substitute modules. Release matching does not prove
-ABI, modversion or signing compatibility.
+Require `CONFIG_MODULES=y` for loadable payloads. Use the kernel configuration
+from `--config` or the kernel's embedded IKCONFIG. Preserve compressed names
+and bytes exactly when `CONFIG_MODULE_DECOMPRESS=y` and the matching
+`CONFIG_MODULE_COMPRESS_XZ`, `GZIP`, or `ZSTD` option is also `y`. Otherwise,
+decompress only the selected modules and their resolved hard dependencies on
+the host, storing them as plain `.ko` files. Unselected modules are never
+decompressed or checked for kernel decompression support. Plain `.ko` bytes
+remain unchanged. Decompressed output is limited to 64 MiB per module;
+XZ decoder memory and zstd windows are also capped at 64 MiB. Invalid streams
+and streams exceeding these limits fail with the selected module's path.
+No module indexes are generated or packed, so there are no index paths to
+rewrite. Release matching does not prove ABI, modversion or signing
+compatibility.
 
 The first version does not implement firmware collection, module parameters,
 modprobe configuration, aliases, softdep ordering, or runtime-requested
@@ -96,7 +104,7 @@ remain unchanged when a transport is modular.
   metadata is discarded, using `linux_banner` when available and bounded,
   unambiguous banner fallback for supported stripped/raw images.
 - `modules`: CLI name validation, discovery, metadata parsing, dependency
-  resolution and safe file inventory.
+  resolution, safe file inventory and bounded host decompression.
 - `initrd`: bounded deterministic newc emission, without changing archive
   pass-through.
 - `kconfig`: built-in module/decompression configuration checks.

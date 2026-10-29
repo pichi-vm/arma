@@ -41,6 +41,7 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 thiserror = "2"
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
 
 [dev-dependencies]
 sha2 = "0.11"
