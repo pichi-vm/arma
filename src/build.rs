@@ -173,7 +173,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         initrd::check_module_init(input).context("materialize initrd with modules")?;
         let release = crate::kernel_release::detect(&kernel_bytes)
             .context("detect target kernel release for modules")?;
-        let selection =
+        let mut selection =
             crate::modules::resolve(&release, args.module_tree.as_deref(), &args.module_names)
                 .context("resolve selected modules")?;
         eprintln!("arma: kernel release: {release}");
@@ -181,9 +181,11 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         for name in &selection.builtins {
             eprintln!("arma: built-in module: {name}");
         }
-        for file in &selection.files {
-            kcfg.check_module(&file.relative)
+        for file in &mut selection.files {
+            let packing = kcfg
+                .check_module(&file.relative)
                 .context("selected module kernel support")?;
+            packing.pack(file).context("prepare selected module")?;
             let kind = if file.is_root {
                 "selected"
             } else {
