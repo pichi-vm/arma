@@ -61,8 +61,11 @@ dpkg-buildflags apply only to the Linux host target.
 
 The clean target removes build output and the private Cargo home and
 sysroot. dh_clean excludes vendor/ to preserve checksummed Cargo.toml.orig
-files. Package integration tests are skipped because they need burrow,
-kernels and network access. Upstream validation still applies before merge.
+files. debian/source/options replaces the default source archive exclusions
+with an exclusion for .git, preserving checksummed vendor dotfiles and
+prebuilt libraries. Package integration tests are skipped because they need
+burrow, kernels and network access. Upstream validation still applies before
+merge.
 
 Refreshing dependencies
 -----------------------

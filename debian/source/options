@@ -1,0 +1,3 @@
+# Cargo verifies vendored dotfiles and prebuilt libraries too. Override
+# dpkg-source's default exclusions so the native archive preserves them.
+tar-ignore = .git
