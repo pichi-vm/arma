@@ -67,7 +67,7 @@ license = "Apache-2.0"
 repository = "https://github.com/pichi-vm/arma"
 
 [workspace.dependencies]
-pmi = { git = "https://github.com/pichi-vm/pmi", version = "0.1" }
+pmi = { git = "https://github.com/pichi-vm/pmi", rev = "2b922270cd81bba763ea781f3eb5ff238f037c97", version = "0.1" }
 devtree = { git = "https://github.com/pichi-vm/devtree", version = "0.1" }
 burrow = { git = "https://github.com/pichi-vm/burrow", version = "0.1" }
 

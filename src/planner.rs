@@ -16,7 +16,9 @@
 //! 1. **PCI window** — fixed at `2^(A-1)` (BAR space, far above RAM).
 //! 2. **kernel** — lowest `align`-aligned slot ≥ `min_gpa`, so it lands just
 //!    above tatu and never approaches any ceiling.
-//! 3. **initrd** — lowest page-aligned slot (above *or* below the kernel).
+//! 3. **initrd + bootconfig** — lowest 2 MiB-aligned slot (above *or* below
+//!    the kernel), with a fixed 2 MiB fill after the padded archive when
+//!    bootconfig is requested.
 //! 4. **device band** — one contiguous block (ECAM + serial + virtio)
 //!    placed high, just below the PCI window, then carved into the
 //!    individual device ranges. Kept far from RAM so changing the device
@@ -76,6 +78,7 @@ pub(crate) struct Planner<'a> {
     pub(crate) reserved: &'a [Range<u64>],
     pub(crate) kernel: KernelSpec,
     pub(crate) initrd_size: Option<u64>,
+    pub(crate) bootconfig: bool,
     /// x86 KASLR relocation table size (bytes); `None`/0 ⇒ not placed. Loaded
     /// into guest RAM for tatu to consume at boot, then no longer needed.
     pub(crate) relocs_size: Option<u64>,
@@ -91,6 +94,8 @@ pub(crate) struct Layout {
     pub(crate) pci_window: Option<Range<u64>>,
     pub(crate) linux: Range<u64>,
     pub(crate) initrd: Option<Range<u64>>,
+    /// Fixed 2 MiB fill immediately following the padded initrd.
+    pub(crate) bootconfig: Option<Range<u64>>,
     pub(crate) relocs: Option<Range<u64>>,
 }
 
@@ -150,13 +155,24 @@ impl Planner<'_> {
 
         // 3. initrd — lowest GRAN-aligned slot (may land above or below the
         //    kernel, e.g. in the gap a high min_gpa leaves beneath it).
-        let initrd = match self.initrd_size {
+        // Place the archive and fill together so nothing can land between
+        // them. Linux sees the pair as one initrd, with bootconfig at its end.
+        let (initrd, bootconfig) = match self.initrd_size {
             Some(sz) if sz > 0 => {
-                let r = first_fit(0, sz, GRAN, &occupied, "initrd")?;
+                let archive_size = align_up(sz, GRAN).ok_or(PlanError::Overflow)?;
+                let fill_size = if self.bootconfig { GRAN } else { 0 };
+                let total = archive_size
+                    .checked_add(fill_size)
+                    .ok_or(PlanError::Overflow)?;
+                let r = first_fit(0, total, GRAN, &occupied, "initrd + bootconfig")?;
                 occupied.push(round_out(&r));
-                Some(r)
+                let archive_end = r.start + archive_size;
+                (
+                    Some(r.start..archive_end),
+                    self.bootconfig.then_some(archive_end..r.end),
+                )
             }
-            _ => None,
+            _ => (None, None),
         };
 
         // 3b. relocs table (x86 KASLR) — lowest GRAN-aligned slot, like initrd.
@@ -203,6 +219,7 @@ impl Planner<'_> {
             pci_window,
             linux,
             initrd,
+            bootconfig,
             relocs,
         })
     }
@@ -337,6 +354,7 @@ mod tests {
                 min_gpa: 0,
             },
             initrd_size: None,
+            bootconfig: false,
             relocs_size: None,
         }
         .plan()
@@ -344,6 +362,8 @@ mod tests {
         assert_eq!(lay.linux.start, 0x20_0000);
         assert_eq!(lay.linux.end, 0x20_0000 + 8 * 1024 * 1024);
         assert!(lay.pci_window.is_none());
+        assert!(lay.initrd.is_none());
+        assert!(lay.bootconfig.is_none());
     }
 
     #[test]
@@ -359,6 +379,7 @@ mod tests {
                 min_gpa: pref,
             },
             initrd_size: None,
+            bootconfig: false,
             relocs_size: None,
         }
         .plan()
@@ -379,12 +400,89 @@ mod tests {
                 min_gpa: pref,
             },
             initrd_size: Some(1024 * 1024), // fits in [2M, 16M)
+            bootconfig: true,
             relocs_size: None,
         }
         .plan()
         .unwrap();
         let initrd = lay.initrd.unwrap();
         assert!(initrd.start >= 0x20_0000 && initrd.end <= pref);
+    }
+
+    #[test]
+    fn initrd_padding_and_fill_keep_whole_large_pages() {
+        let reserved = tatu_low();
+        for size in [1, GRAN - 1, GRAN, GRAN + 1] {
+            let lay = Planner {
+                args: args(false, 0, 0),
+                reserved: &reserved,
+                kernel: KernelSpec {
+                    size: GRAN,
+                    align: GRAN,
+                    min_gpa: 0,
+                },
+                initrd_size: Some(size),
+                bootconfig: true,
+                relocs_size: Some(4096),
+            }
+            .plan()
+            .unwrap();
+            let archive = lay.initrd.unwrap();
+            let fill = lay.bootconfig.unwrap();
+            let relocs = lay.relocs.unwrap();
+            assert_eq!(archive.start, lay.linux.end);
+            assert_eq!(archive.end - archive.start, size.div_ceil(GRAN) * GRAN);
+            assert_eq!(archive.end, fill.start);
+            assert_eq!(fill.start % GRAN, 0);
+            assert_eq!(fill.end - fill.start, GRAN);
+            assert_eq!(relocs.start, fill.end);
+        }
+    }
+
+    #[test]
+    fn initrd_and_fill_move_together_when_gap_is_too_small() {
+        let reserved = tatu_low();
+        let lay = Planner {
+            args: args(false, 0, 0),
+            reserved: &reserved,
+            kernel: KernelSpec {
+                size: 2 * GRAN,
+                align: GRAN,
+                min_gpa: 8 * GRAN,
+            },
+            // The archive alone fits below the kernel, but its fill does not.
+            initrd_size: Some(7 * GRAN),
+            bootconfig: true,
+            relocs_size: None,
+        }
+        .plan()
+        .unwrap();
+        let archive = lay.initrd.unwrap();
+        let fill = lay.bootconfig.unwrap();
+        assert_eq!(archive.start, lay.linux.end);
+        assert_eq!(archive.end, fill.start);
+        assert_eq!(fill.end - archive.start, 8 * GRAN);
+    }
+
+    #[test]
+    fn initrd_reservation_rejects_size_overflow() {
+        let reserved = tatu_low();
+        for size in [u64::MAX, u64::MAX - (GRAN - 1)] {
+            let plan = Planner {
+                args: args(false, 0, 0),
+                reserved: &reserved,
+                kernel: KernelSpec {
+                    size: GRAN,
+                    align: GRAN,
+                    min_gpa: 0,
+                },
+                initrd_size: Some(size),
+                bootconfig: true,
+                relocs_size: None,
+            }
+            .plan();
+            assert!(matches!(plan, Err(PlanError::Overflow)));
+        }
     }
 
     #[test]
@@ -399,6 +497,7 @@ mod tests {
                 min_gpa: 0,
             },
             initrd_size: None,
+            bootconfig: false,
             relocs_size: None,
         }
         .plan()
@@ -420,6 +519,7 @@ mod tests {
                 min_gpa: 0,
             },
             initrd_size: None,
+            bootconfig: false,
             relocs_size: None,
         }
         .plan()
@@ -460,6 +560,7 @@ mod tests {
                 min_gpa: 0,
             },
             initrd_size: None,
+            bootconfig: false,
             relocs_size: None,
         }
         .plan();

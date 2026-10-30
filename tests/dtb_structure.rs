@@ -129,16 +129,11 @@ fn chosen_initrd_range_is_consistent_x86() {
         .find(|s| s.name().unwrap_or("") == ".initrd")
         .expect(".initrd section present");
     assert_eq!(start, u64::from(initrd_sec.virtual_address));
-    // /chosen carries the natural initrd byte count (what Linux reads),
-    // while the .initrd section's VirtualSize equals SizeOfRawData
-    // (Data shape per PMI core spec — see pe.rs alignment_for). The
-    // natural size fits within the padded extent and the extent is
-    // 4 KiB-aligned.
-    let natural = end - start;
+    // /chosen spans the padded archive.
     let padded = u64::from(initrd_sec.virtual_size);
-    assert!(natural > 0 && natural <= padded);
-    assert_eq!(padded, u64::from(initrd_sec.size_of_raw_data));
-    assert_eq!(padded % 0x1000, 0);
+    assert_eq!(end - start, padded);
+    assert!(padded >= u64::from(initrd_sec.size_of_raw_data));
+    assert_eq!(padded % (2 * 1024 * 1024), 0);
 }
 
 #[test]
