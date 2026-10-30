@@ -20,6 +20,7 @@ use crate::tatu::TatuImage;
 /// come straight from tatu's ELF).
 pub(crate) const SECTION_LINUX: &str = ".linux";
 pub(crate) const SECTION_INITRD: &str = ".initrd";
+pub(crate) const SECTION_BOOTCONFIG: &str = ".bconf";
 /// x86 KASLR relocation table (loaded for tatu to consume at boot).
 pub(crate) const SECTION_RELOCS: &str = ".linux.relocs";
 // The base DTB and host-DTBO are tatu-defined sections (arma fills
@@ -82,6 +83,7 @@ pub(crate) const SECTION_PMI_VM: &str = ".pmi.vm";
 pub(crate) struct ActionGpas {
     pub(crate) linux: u64,
     pub(crate) initrd: Option<u64>,
+    pub(crate) bootconfig: Option<u64>,
     pub(crate) relocs: Option<u64>,
 }
 
@@ -162,6 +164,13 @@ fn build_actions(tatu: &TatuImage, gpas: ActionGpas, dtb_mode: DtbMode) -> Vec<A
             gpa,
             section: SECTION_INITRD.into(),
             kind: LoadKind::default(),
+        }));
+    }
+    if let Some(gpa) = gpas.bootconfig {
+        out.push(Action::Fill(Fill {
+            gpa,
+            section: SECTION_BOOTCONFIG.into(),
+            kind: FillKind::LbcBootconfig,
         }));
     }
     if let Some(gpa) = gpas.relocs {
@@ -379,6 +388,7 @@ mod tests {
         let gpas = ActionGpas {
             linux: 0x20_0000,
             initrd: Some(0x100_0000),
+            bootconfig: Some(0x120_0000),
             relocs: Some(0x200_0000),
         };
         let cbor = build_pmi_vm(Arch::X86_64, &tatu, gpas, "x86-64-v3", DtbMode::Attached).unwrap();
@@ -418,6 +428,7 @@ mod tests {
         let gpas = ActionGpas {
             linux: 0x20_0000,
             initrd: None,
+            bootconfig: None,
             relocs: None,
         };
         let cbor =
@@ -441,6 +452,7 @@ mod tests {
         let gpas = ActionGpas {
             linux: 0x20_0000,
             initrd: None,
+            bootconfig: None,
             relocs: None,
         };
         let cbor = build_pmi_vm(Arch::X86_64, &tatu, gpas, "x86-64-v3", mode).unwrap();

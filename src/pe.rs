@@ -99,18 +99,17 @@ const PE32PLUS_MAGIC: u16 = 0x020B;
 const FILE_ALIGNMENT: u32 = 0x1000;
 const SECTION_ALIGNMENT: u32 = 0x1000;
 
-/// PMI LARGE-section threshold: sections whose payload is ≥ 2 MiB must
-/// have `VirtualAddress`, `PointerToRawData`, and `SizeOfRawData` all
-/// 2 MiB-aligned (see pmi/spec/granularity.md).
+/// PMI LARGE-section threshold: sections whose memory extent is ≥ 2 MiB
+/// must start at 2 MiB boundaries in guest memory and in the file.
 const LARGE_THRESHOLD: u64 = 2 * 1024 * 1024;
 const LARGE_ALIGNMENT: u32 = 2 * 1024 * 1024;
 
-/// True when this section is loaded into the guest and its on-disk
-/// payload reaches the PMI LARGE threshold. LARGE sections need 2 MiB
-/// alignment on both ends; SMALL sections (and non-loaded / zero-shape
-/// sections) use the default 4 KiB alignment.
+/// Large Padded sections need aligned file starts even when their data is small.
+/// Non-loaded and Zero sections do not need a large on-disk payload alignment.
 fn is_large_payload(s: &Section<'_>) -> bool {
-    !s.non_loaded && !s.is_zero_shape() && s.data.len() as u64 >= LARGE_THRESHOLD
+    !s.non_loaded
+        && !s.is_zero_shape()
+        && s.virtual_size.max(s.data.len() as u64) >= LARGE_THRESHOLD
 }
 
 fn alignment_for(s: &Section<'_>) -> u32 {

@@ -148,8 +148,9 @@ fn selected_modules_and_dependencies_reach_pmi_deterministically() {
     let end_prop = chosen.property("linux,initrd-end").unwrap();
     let extent = u64::from_be_bytes(end_prop.as_ref().try_into().unwrap())
         - u64::from_be_bytes(start_prop.as_ref().try_into().unwrap());
+    assert_eq!(extent, u64::from(section.virtual_size));
     let offset = section.pointer_to_raw_data as usize;
-    let archive = &bytes[offset..offset + usize::try_from(extent).unwrap()];
+    let archive = &bytes[offset..offset + section.size_of_raw_data as usize];
     let packed = entries(archive);
     assert_eq!(packed["init"], elf);
     let selected: Vec<_> = packed

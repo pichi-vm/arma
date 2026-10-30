@@ -91,7 +91,10 @@ fn build(e: &Entry, case: Case, dir: &Path) -> Option<Vec<u8>> {
 
     let st = cmd.status().expect("spawn arma");
     assert!(st.success(), "arma build failed: {}", e.url);
-    Some(std::fs::read(&pmi).unwrap())
+    let bytes = std::fs::read(&pmi).unwrap();
+    let pe = goblin::pe::PE::parse(&bytes).unwrap();
+    assert!(!pe.sections.iter().any(|s| s.name().unwrap() == ".bconf"));
+    Some(bytes)
 }
 
 /// A well-formed PMI: a valid PE for the host arch, every LARGE (>=2 MiB)

@@ -14,6 +14,7 @@ use std::io::Read;
 use thiserror::Error;
 
 use crate::kernel::Arch;
+use crate::kernel_cmdline::KernelCommandLine;
 
 /// A parsed kernel build config (text Kconfig — `CONFIG_x=y/m` / `# … is not
 /// set` lines). Held verbatim; symbols are matched on demand.
@@ -83,7 +84,86 @@ pub(crate) struct ModuleConfigError {
     option: &'static str,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum BootconfigError {
+    #[error("bootconfig requires {0}=y")]
+    MissingSupport(&'static str),
+
+    #[error("kernel command-line configuration or truncation removes bootconfig activation")]
+    Inactive,
+}
+
 impl KernelConfig {
+    /// Check that a requested initrd bootconfig reaches /proc/bootconfig.
+    pub(crate) fn check_bootconfig(
+        &self,
+        arch: Arch,
+        cmdline: &str,
+    ) -> Result<(), BootconfigError> {
+        for option in [
+            "CONFIG_BOOT_CONFIG",
+            "CONFIG_BLK_DEV_INITRD",
+            "CONFIG_PROC_FS",
+        ] {
+            if !self.is_builtin(option) {
+                return Err(BootconfigError::MissingSupport(option));
+            }
+        }
+        if self.is_builtin("CONFIG_BOOT_CONFIG_FORCE") {
+            return Ok(());
+        }
+        let mut effective = cmdline.as_bytes().to_vec();
+        effective.truncate(KernelCommandLine::CAPACITY - 1);
+        let builtin = self.builtin_cmdline();
+        // Match arch/x86/kernel/setup.c and drivers/of/fdt.c. x86 prepends
+        // its built-in arguments; arm64 may replace or append them.
+        match arch {
+            Arch::X86_64 if self.is_builtin("CONFIG_CMDLINE_BOOL") => {
+                if self.is_builtin("CONFIG_CMDLINE_OVERRIDE") {
+                    effective = builtin.into_bytes();
+                } else if !builtin.is_empty() {
+                    let mut combined = builtin.into_bytes();
+                    combined.push(b' ');
+                    combined.extend(effective);
+                    effective = combined;
+                }
+            }
+            Arch::Aarch64 if self.is_builtin("CONFIG_CMDLINE_EXTEND") => {
+                effective.push(b' ');
+                effective.extend(builtin.as_bytes());
+            }
+            Arch::Aarch64 if self.is_builtin("CONFIG_CMDLINE_FORCE") => {
+                effective = builtin.into_bytes();
+            }
+            _ => {}
+        }
+        effective.truncate(KernelCommandLine::CAPACITY - 1);
+        if KernelCommandLine(&effective).bootconfig_requested() {
+            Ok(())
+        } else {
+            Err(BootconfigError::Inactive)
+        }
+    }
+
+    fn builtin_cmdline(&self) -> String {
+        let value = self.text.lines().find_map(|line| {
+            line.trim_start()
+                .strip_prefix("CONFIG_CMDLINE=\"")?
+                .strip_suffix('"')
+        });
+        // Kconfig escapes double quotes and backslashes in string values.
+        let mut chars = value.unwrap_or_default().chars();
+        let mut decoded = String::new();
+        while let Some(c) = chars.next() {
+            decoded.push(if c == '\\' {
+                chars.next().unwrap_or(c)
+            } else {
+                c
+            });
+        }
+        decoded
+    }
+
     /// Keep compressed bytes for `finit_module` only when the kernel has all
     /// required decompression facilities built in; otherwise unpack on the host.
     pub(crate) fn check_module(
@@ -338,6 +418,130 @@ pub(crate) fn raise_to_floor(chosen: &str, floor: &str, arch: Arch) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BOOTCONFIG_SUPPORT: &str =
+        "CONFIG_BOOT_CONFIG=y\nCONFIG_BLK_DEV_INITRD=y\nCONFIG_PROC_FS=y\n";
+
+    #[test]
+    fn bootconfig_requires_each_builtin_feature() {
+        for option in [
+            "CONFIG_BOOT_CONFIG",
+            "CONFIG_BLK_DEV_INITRD",
+            "CONFIG_PROC_FS",
+        ] {
+            for value in ["", "n", "m"] {
+                let text = BOOTCONFIG_SUPPORT
+                    .replace(&format!("{option}=y"), &format!("{option}={value}"));
+                for arch in [Arch::X86_64, Arch::Aarch64] {
+                    let err = cfg(&text).check_bootconfig(arch, "bootconfig").unwrap_err();
+                    assert!(
+                        matches!(err, BootconfigError::MissingSupport(missing) if missing == option)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bootconfig_checks_effective_kernel_arguments() {
+        for (arch, options, active) in [
+            (Arch::X86_64, "", true),
+            (Arch::Aarch64, "", true),
+            (
+                Arch::X86_64,
+                "CONFIG_CMDLINE_BOOL=y\nCONFIG_CMDLINE_OVERRIDE=y\nCONFIG_CMDLINE=\"quiet\"",
+                false,
+            ),
+            (
+                Arch::Aarch64,
+                "CONFIG_CMDLINE_FORCE=y\nCONFIG_CMDLINE=\"quiet\"",
+                false,
+            ),
+            (
+                Arch::X86_64,
+                "CONFIG_CMDLINE_BOOL=y\nCONFIG_CMDLINE_OVERRIDE=y\nCONFIG_CMDLINE=\"bootconfig quiet\"",
+                true,
+            ),
+            (
+                Arch::Aarch64,
+                "CONFIG_CMDLINE_FORCE=y\nCONFIG_CMDLINE=\"bootconfig=0\"",
+                true,
+            ),
+            (
+                Arch::X86_64,
+                "CONFIG_CMDLINE_BOOL=y\nCONFIG_CMDLINE=\"quiet --\"",
+                false,
+            ),
+            (
+                Arch::Aarch64,
+                "CONFIG_CMDLINE_EXTEND=y\nCONFIG_CMDLINE=\"quiet --\"",
+                true,
+            ),
+            (
+                Arch::X86_64,
+                "CONFIG_CMDLINE_OVERRIDE=y\nCONFIG_CMDLINE=\"quiet\"",
+                true,
+            ),
+            (Arch::Aarch64, "CONFIG_CMDLINE=\"quiet\"", true),
+            (
+                Arch::Aarch64,
+                "CONFIG_CMDLINE_FORCE=y\nCONFIG_CMDLINE=\"-- bootconfig\"",
+                false,
+            ),
+            (
+                Arch::Aarch64,
+                r#"CONFIG_CMDLINE_FORCE=y
+CONFIG_CMDLINE="label=\"bootconfig\"""#,
+                false,
+            ),
+            (
+                Arch::Aarch64,
+                r#"CONFIG_CMDLINE_FORCE=y
+CONFIG_CMDLINE="\"bootconfig\"""#,
+                true,
+            ),
+        ] {
+            let kernel = cfg(&format!("{BOOTCONFIG_SUPPORT}{options}\n"));
+            let result = kernel.check_bootconfig(arch, "bootconfig console=hvc0");
+            assert_eq!(result.is_ok(), active, "{arch:?}: {options}");
+            if !active {
+                assert!(matches!(result, Err(BootconfigError::Inactive)));
+            }
+            let forced = cfg(&format!(
+                "{BOOTCONFIG_SUPPORT}{options}\nCONFIG_BOOT_CONFIG_FORCE=y\n"
+            ));
+            assert!(forced.check_bootconfig(arch, "bootconfig").is_ok());
+        }
+    }
+
+    #[test]
+    fn bootconfig_activation_must_survive_cmdline_truncation() {
+        let support = cfg(BOOTCONFIG_SUPPORT);
+        let limit = KernelCommandLine::CAPACITY - 1;
+        for arch in [Arch::X86_64, Arch::Aarch64] {
+            let fitting = format!("{} bootconfig", "x".repeat(limit - 11));
+            assert!(support.check_bootconfig(arch, &fitting).is_ok());
+            assert!(
+                support
+                    .check_bootconfig(arch, &format!("x{fitting}"))
+                    .is_err()
+            );
+            assert!(
+                support
+                    .check_bootconfig(arch, &format!("bootconfig {}", "x".repeat(limit)))
+                    .is_ok()
+            );
+        }
+        let prepended = cfg(&format!(
+            "{BOOTCONFIG_SUPPORT}CONFIG_CMDLINE_BOOL=y\nCONFIG_CMDLINE=\"{}\"\n",
+            "x".repeat(limit - 5)
+        ));
+        assert!(
+            prepended
+                .check_bootconfig(Arch::X86_64, "bootconfig")
+                .is_err()
+        );
+    }
 
     #[test]
     fn selected_module_compression_requires_builtin_kernel_support() {

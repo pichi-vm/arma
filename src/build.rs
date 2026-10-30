@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::fs_ext::AtomicWrite;
+use crate::kernel_cmdline::KernelCommandLine;
 use crate::{base_dtb, bootinfo, initrd, kconfig, kernel, manifest, pe, planner, tatu};
 
 pub(crate) use crate::manifest::DtbMode;
@@ -139,6 +140,12 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     let addr_space_bits = args.min_addr_space.unwrap_or(def_x);
     let window_bits = args.pci_window.unwrap_or(def_b);
     let kcfg = load_kernel_config(args, &kernel_bytes)?;
+    let bootconfig = KernelCommandLine(args.cmdline.as_bytes()).bootconfig_requested();
+    let cmdline = serial_earlycon_cmdline(args.serial, &args.cmdline);
+    if bootconfig {
+        kcfg.check_bootconfig(arch, &cmdline)
+            .context("bootconfig kernel support")?;
+    }
     let (mmio_slots, pci_slots) = kcfg
         .infer_slots(arch, args.mmio_slots, args.pci_slots)
         .context("slot inference")?;
@@ -207,6 +214,9 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         ))
     };
     let initrd_size = initrd_materialized.as_ref().map(|v| v.len() as u64);
+    if bootconfig && initrd_size.is_none_or(|size| size == 0) {
+        bail!("bootconfig requires a nonempty --initrd");
+    }
 
     // ---- Step 4: select embedded tatu ----
     let tatu_elf = native_tatu_elf(arch)?;
@@ -252,6 +262,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
             min_gpa: kernel_pref_addr,
         },
         initrd_size,
+        bootconfig,
         relocs_size,
     }
     .plan()
@@ -260,8 +271,10 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     // ---- Step 8: base DTB (single pass) ----
     // Device addresses and the initrd extent both come from the plan, so the
     // DTB is built once — no sizing/final two-pass dance.
-    let cmdline = serial_earlycon_cmdline(args.serial, &args.cmdline);
-    let initrd_extent = lay.initrd.as_ref().map(|r| (r.start, r.end - r.start));
+    let initrd_extent = lay.initrd.as_ref().map(|r| {
+        let end = lay.bootconfig.as_ref().map_or(r.end, |fill| fill.end);
+        (r.start, end - r.start)
+    });
     let dtb_bytes = base_dtb::build(&base_dtb::Inputs {
         arch,
         cmdline: &cmdline,
@@ -334,6 +347,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     let action_gpas = manifest::ActionGpas {
         linux: lay.linux.start,
         initrd: lay.initrd.as_ref().map(|r| r.start),
+        bootconfig: lay.bootconfig.as_ref().map(|r| r.start),
         relocs: lay.relocs.as_ref().map(|r| r.start),
     };
     let cbor = manifest::build_pmi_vm(arch, &tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
@@ -526,13 +540,7 @@ fn assemble_sections<'a>(
         non_loaded: false,
     });
 
-    // SMALL pool. Emitted in guest-VA order, with Data-shape sections
-    // first and the Zero-shape `.dtbo` last (matches layout::compute).
-    // File offsets follow declaration order in pe::build_pe, so the
-    // Data SMALLs end up as one contiguous file run aligned with their
-    // guest-VA run — letting a VMM mmap them as a single unit.
-
-    // .initrd — borrowed.
+    // .initrd — archive bytes followed by implicit zeros to a 2 MiB boundary.
     if let (Some(bytes), Some(r)) = (initrd_bytes, &lay.initrd) {
         out.push(pe::Section {
             name: manifest::SECTION_INITRD.into(),
@@ -540,6 +548,19 @@ fn assemble_sections<'a>(
             virtual_size: r.end - r.start,
             data: Cow::Borrowed(bytes),
             characteristics: pe::IMAGE_SCN_CNT_INITIALIZED_DATA | pe::IMAGE_SCN_MEM_READ,
+            non_loaded: false,
+        });
+    }
+
+    // .bconf — fixed adjacent reservation, filled by the VMM at launch. The
+    // normal initrd bounds include it, so tatu needs no bootconfig metadata.
+    if let Some(r) = &lay.bootconfig {
+        out.push(pe::Section {
+            name: manifest::SECTION_BOOTCONFIG.into(),
+            vaddr: r.start,
+            virtual_size: r.end - r.start,
+            data: Cow::Borrowed(&[]),
+            characteristics: pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA | pe::IMAGE_SCN_MEM_READ,
             non_loaded: false,
         });
     }

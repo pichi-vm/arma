@@ -21,6 +21,7 @@ mod fs_ext;
 mod initrd;
 mod kconfig;
 mod kernel;
+mod kernel_cmdline;
 mod kernel_release;
 mod manifest;
 mod modules;
@@ -101,9 +102,9 @@ struct BuildArgs {
     #[arg(long, requires = "modules")]
     module_tree: Option<PathBuf>,
 
-    /// Kernel command line. Required — arma does not pick defaults
-    /// (operator/test-harness chooses; arma is a faithful translator,
-    /// not a policy maker).
+    /// Guest kernel command line. A bootconfig argument before `--` requests
+    /// a fixed 2 MiB bootconfig reservation and requires a compatible kernel
+    /// and --initrd.
     #[arg(long)]
     cmdline: String,
 
@@ -114,8 +115,8 @@ struct BuildArgs {
     profile: Option<String>,
 
     /// Kernel build config (text Kconfig). Drives slot inference and
-    /// drivability checks. If omitted, Arma falls back to a PCI-bridge
-    /// default (TODO C5: extract the kernel's embedded CONFIG_IKCONFIG).
+    /// drivability and bootconfig checks. If omitted, use embedded
+    /// CONFIG_IKCONFIG; fail if neither is available.
     #[arg(long)]
     config: Option<PathBuf>,
 
