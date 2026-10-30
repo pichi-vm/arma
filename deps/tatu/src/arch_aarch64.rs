@@ -179,10 +179,9 @@ pub(crate) fn guest_pa_bits() -> u32 {
         2 => 40,
         3 => 42,
         4 => 44,
-        5 => 48,
         6 => 52,
         7 => 56,
-        // Reserved encodings: fall back to the AArch64 architectural maximum.
+        // 5 is 48 bits. Reserved encodings fall back to the same 48 bits.
         _ => 48,
     }
 }

@@ -58,8 +58,13 @@ impl<const N: usize> AcpiBuffer<N> {
     /// Zero-initialized buffer with no live image. `const` so it can
     /// back a `static` slot:
     ///
-    /// ```ignore
+    /// ```
+    /// use dtb2acpi::AcpiBuffer;
+    ///
     /// static ACPI: AcpiBuffer<8192> = AcpiBuffer::new();
+    ///
+    /// assert_eq!(ACPI.as_ref().len(), 8192);
+    /// assert!(ACPI.as_ref().iter().all(|&b| b == 0));
     /// ```
     #[must_use]
     pub const fn new() -> Self {
