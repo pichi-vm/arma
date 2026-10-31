@@ -78,6 +78,8 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
+# Modules live in foo/mod.rs, never in foo.rs.
+self_named_module_files = "deny"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # arma/tatu/dtb2acpi/dtb2e820 are full of hardware addresses (e820 maps, ACPI
