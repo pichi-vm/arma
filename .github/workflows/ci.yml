@@ -74,7 +74,7 @@ jobs:
       - run: rustup show # installs the pinned nightly + components + targets
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets --all-features
       # tatu is firmware: lint it for both bare-metal targets too, since
       # the host-target run above never builds the arch code.
       - run: cargo clippy -p tatu --target x86_64-unknown-none
