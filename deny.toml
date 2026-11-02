@@ -4,7 +4,6 @@
 [licenses]
 allow = [
     "Apache-2.0", "MIT", "Unicode-3.0",
-    "BSD-3-Clause", "Zlib",
 ]
 confidence-threshold = 0.8
 
