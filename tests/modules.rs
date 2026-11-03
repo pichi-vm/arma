@@ -35,6 +35,14 @@ fn entries(mut bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
             .unwrap()
             .to_owned();
         let start = (110 + len + 3) & !3;
+        assert!(!name.starts_with("lib/modules"), "{name}");
+        if name.starts_with("usr/lib/modules/") && name.contains(".ko") {
+            assert!(
+                Path::new(&name).extension().is_some_and(|ext| ext == "ko"),
+                "{name}"
+            );
+            assert_eq!(field(14, 22) & 0o170_000, 0o100_000, "{name}");
+        }
         if name == "TRAILER!!!" {
             break;
         }
@@ -229,13 +237,24 @@ fn selected_modules_and_dependencies_reach_pmi_deterministically() {
     assert!(!temp.path().join("archive.pmi").exists());
 }
 
+fn archive(image: &Path) -> BTreeMap<String, Vec<u8>> {
+    let image = std::fs::read(image).unwrap();
+    let pe = goblin::pe::PE::parse(&image).unwrap();
+    let section = pe
+        .sections
+        .iter()
+        .find(|s| s.name().unwrap() == ".initrd")
+        .unwrap();
+    entries(&image[section.pointer_to_raw_data as usize..])
+}
+
 #[test]
-fn compressed_modules_follow_kernel_support_in_the_packed_archive() {
+fn compressed_modules_and_signatures_reach_the_archive() {
     let (kernel, base_config) = common::host_kernel().expect("real kernel and config available");
     let temp = TempDir::new().unwrap();
     let tree = temp.path().join("modules");
     std::fs::create_dir_all(tree.join("kernel/lib")).unwrap();
-    std::fs::write(tree.join("modules.builtin"), "").unwrap();
+    std::fs::write(tree.join("modules.builtin"), "builtin.ko\n").unwrap();
     let init = temp.path().join("init");
     std::fs::write(&init, static_elf()).unwrap();
     let config = temp.path().join("config");
@@ -245,90 +264,136 @@ fn compressed_modules_follow_kernel_support_in_the_packed_archive() {
         .filter(|line| !line.starts_with("CONFIG_MODULE"))
         .collect::<Vec<_>>()
         .join("\n");
+    let payload = b"\0ELF-like module\xff\0signature bytes\x01\x02\0~Module signature appended~\n";
+    std::fs::write(tree.join("kernel/plain.ko"), payload).unwrap();
     let out = temp.path().join("image.pmi");
-    for (suffix, symbol, compressed) in [
-        ("gz", "GZIP", include_bytes!("data/module.ko.gz").as_slice()),
-        ("xz", "XZ", include_bytes!("data/module.ko.xz").as_slice()),
-        (
-            "zst",
-            "ZSTD",
-            include_bytes!("data/module.ko.zst").as_slice(),
-        ),
-    ] {
-        let root = format!("kernel/root.ko.{suffix}");
-        let dependency = format!("kernel/lib/helper.ko.{suffix}");
-        std::fs::write(tree.join(&root), compressed).unwrap();
-        std::fs::write(tree.join(&dependency), compressed).unwrap();
-        let mut index = format!("{root}: {dependency}\n{dependency}:\n");
-        // All unselected formats are deliberately invalid compressed streams.
-        // They must not trigger codec checks or host decompression.
-        for unselected in ["gz", "xz", "zst"] {
-            let path = format!("kernel/unselected_{unselected}.ko.{unselected}");
-            std::fs::write(tree.join(&path), b"invalid compressed module").unwrap();
-            index.push_str(&path);
-            index.push_str(":\n");
-        }
-        std::fs::write(tree.join("modules.dep"), &index).unwrap();
-        for keep in [false, true] {
-            std::fs::write(
-                &config,
-                format!(
-                    "{base_config}\nCONFIG_MODULES=y\nCONFIG_MODULE_DECOMPRESS={}\nCONFIG_MODULE_COMPRESS_{symbol}=y\n",
-                    if keep { "y" } else { "n" }
-                ),
-            )
-            .unwrap();
-            let result = build(kernel, &config, &init, &tree, &out, &["root"]);
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            let image = std::fs::read(&out).unwrap();
-            let pe = goblin::pe::PE::parse(&image).unwrap();
-            let section = pe
-                .sections
-                .iter()
-                .find(|s| s.name().unwrap() == ".initrd")
-                .unwrap();
-            let packed = entries(&image[section.pointer_to_raw_data as usize..]);
-            let module_files: Vec<_> = packed
-                .iter()
-                .filter(|(path, _)| path.starts_with("usr/lib/modules/") && path.contains(".ko"))
-                .collect();
-            assert_eq!(module_files.len(), 2);
-            for (path, bytes) in module_files {
-                let expected = if keep {
-                    compressed
-                } else {
-                    b"\0module payload\xff\n"
-                };
-                assert_eq!(bytes, expected);
-                assert!(
-                    if keep {
-                        path.ends_with(&root) || path.ends_with(&dependency)
-                    } else {
-                        path.ends_with("/kernel/root.ko") || path.ends_with("/kernel/lib/helper.ko")
-                    },
-                    "{path}"
-                );
-            }
-            assert!(
-                !packed
-                    .keys()
-                    .any(|path| path.contains("unselected") || path.ends_with("modules.dep"))
-            );
-            let again = build(kernel, &config, &init, &tree, &out, &["root", "root"]);
-            assert!(again.status.success());
-            assert_eq!(image, std::fs::read(&out).unwrap());
-        }
-        // The read-only source tree and its index must not be rewritten.
-        assert_eq!(
-            std::fs::read_to_string(tree.join("modules.dep")).unwrap(),
-            index
+    let root = "kernel/root.ko.zst";
+    let compressed = include_bytes!("data/signed.ko.zst");
+    let dependency = "kernel/lib/helper.ko.xz";
+    let helper = include_bytes!("data/signed.ko.xz");
+    std::fs::write(tree.join(root), compressed).unwrap();
+    std::fs::write(tree.join(dependency), helper).unwrap();
+    let mut index = format!("{root}: {dependency}\n{dependency}:\nkernel/plain.ko:\n");
+    // All unselected formats are deliberately invalid compressed streams.
+    // They must not trigger codec checks or host decompression.
+    for unselected in ["gz", "xz", "zst"] {
+        let path = format!("kernel/unselected_{unselected}.ko.{unselected}");
+        std::fs::write(tree.join(&path), b"invalid compressed module").unwrap();
+        index.push_str(&path);
+        index.push_str(":\n");
+    }
+    std::fs::write(tree.join("modules.dep"), &index).unwrap();
+    for decompressor in [false, true] {
+        std::fs::write(
+            &config,
+            format!(
+                "{base_config}\nCONFIG_MODULES=y\nCONFIG_MODULE_DECOMPRESS={}\nCONFIG_MODULE_COMPRESS_ZSTD=y\n",
+                if decompressor { "y" } else { "n" }
+            ),
+        )
+        .unwrap();
+        let result = build(
+            kernel,
+            &config,
+            &init,
+            &tree,
+            &out,
+            &["root", "plain", "builtin"],
         );
-        assert_eq!(std::fs::read(tree.join(root)).unwrap(), compressed);
-        assert_eq!(std::fs::read(tree.join(dependency)).unwrap(), compressed);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let image = std::fs::read(&out).unwrap();
+        let pe = goblin::pe::PE::parse(&image).unwrap();
+        let section = pe
+            .sections
+            .iter()
+            .find(|s| s.name().unwrap() == ".initrd")
+            .unwrap();
+        let packed = entries(&image[section.pointer_to_raw_data as usize..]);
+        let module_files: Vec<_> = packed
+            .iter()
+            .filter(|(path, _)| path.starts_with("usr/lib/modules/") && path.contains(".ko"))
+            .collect();
+        assert_eq!(module_files.len(), 3);
+        for (path, bytes) in module_files {
+            assert_eq!(bytes, payload);
+            assert!(
+                path.ends_with("/kernel/root.ko")
+                    || path.ends_with("/kernel/lib/helper.ko")
+                    || path.ends_with("/kernel/plain.ko"),
+                "{path}"
+            );
+        }
+        assert!(
+            !packed
+                .keys()
+                .any(|path| path.contains("unselected") || path.ends_with("modules.dep"))
+        );
+    }
+    // The read-only source tree and its index must not be rewritten.
+    assert_eq!(
+        std::fs::read_to_string(tree.join("modules.dep")).unwrap(),
+        index
+    );
+    assert_eq!(std::fs::read(tree.join(root)).unwrap(), compressed);
+    assert_eq!(std::fs::read(tree.join(dependency)).unwrap(), helper);
+    let result = build(kernel, &config, &init, &tree, &out, &["builtin"]);
+    assert!(result.status.success());
+    assert!(
+        !archive(&out)
+            .keys()
+            .any(|p| p.starts_with("usr/lib/modules/"))
+    );
+}
+
+#[rstest::rstest]
+#[case("bad.ko.bz2", b"BZh9bad", "bz2", false, false)]
+#[case("bad.ko.gz", include_bytes!("data/module.ko.xz"), "magic", true, true)]
+#[case("bad.ko.gz", &[0x1f, 0x8b, 0, 0], "decompress", false, true)]
+fn unsupported_mismatched_and_malformed_modules_preserve_the_destination(
+    #[case] path: &str,
+    #[case] bytes: &[u8],
+    #[case] expected: &str,
+    #[case] dependency: bool,
+    #[case] existing: bool,
+) {
+    let (kernel, base_config) = common::host_kernel().expect("real kernel and config available");
+    let temp = TempDir::new().unwrap();
+    let tree = temp.path().join("modules");
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("modules.builtin"), "").unwrap();
+    let init = temp.path().join("init");
+    std::fs::write(&init, static_elf()).unwrap();
+    let config = temp.path().join("config");
+    let base = std::fs::read_to_string(base_config).unwrap();
+    std::fs::write(&config, format!("{base}\nCONFIG_MODULES=y\n")).unwrap();
+    std::fs::write(tree.join(path), bytes).unwrap();
+    let index = if dependency {
+        format!("root.ko: {path}\n{path}:\n")
+    } else {
+        format!("{path}:\n")
+    };
+    std::fs::write(tree.join("modules.dep"), index).unwrap();
+    std::fs::write(tree.join("root.ko"), b"root").unwrap();
+    let out = temp.path().join("failed.pmi");
+    if existing {
+        std::fs::write(&out, b"previous destination").unwrap();
+    }
+    let name = if dependency { "root" } else { "bad" };
+    let result = build(kernel, &config, &init, &tree, &out, &[name]);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains(path) && stderr.contains(expected),
+        "{stderr}"
+    );
+    if existing {
+        assert_eq!(std::fs::read(&out).unwrap(), b"previous destination");
+    } else {
+        assert!(!out.exists());
     }
 }
 
