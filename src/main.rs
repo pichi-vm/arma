@@ -87,7 +87,8 @@ struct BuildArgs {
     kernel: PathBuf,
 
     /// Initramfs: complete cpio newc, uncompressed or gzip/zstd compressed,
-    /// passed through unchanged (kernel needs CONFIG_RD_GZIP/ZSTD to unpack).
+    /// passed through after validation (kernel needs CONFIG_RD_GZIP/ZSTD).
+    /// Compressed modules inside supplied archives are rejected.
     /// A static ELF is wrapped in a cpio archive at /init.
     #[arg(long)]
     initrd: Option<PathBuf>,
