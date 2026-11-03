@@ -36,6 +36,11 @@ When `--initrd` is a static ELF (for example Corium), repeat `--module NAME`
 to include named modules and their hard dependencies in the generated archive.
 Arma detects the target kernel's release and discovers its installed module tree;
 `--module-tree PATH` overrides the source with a release-specific directory.
+Arma decodes selected modules on the host to plain `.ko` files under
+`/usr/lib/modules/<release>/`, preserving appended signatures without a guest
+decompressor. Supplied archives are validated without rewriting; compressed
+module names anywhere cause a build error.
+
 See [module packaging](docs/module-packaging.md) for the interface, validation,
 limitations, and acceptance criteria.
 

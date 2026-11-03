@@ -4,9 +4,10 @@
 
 Extend the static-ELF `arma build --initrd` path to package explicitly
 selected kernel modules and their hard dependencies for an init such as
-Corium. Keep the existing no-module behavior and complete-archive
-pass-through unchanged. Do not change PMI, Corium, or unrelated security
-and interrupt behavior.
+Corium. Decode every selected module on the host, including its hard
+dependencies, storing plain `.ko` files in the archive. Complete
+archives are validated without rewriting, rejecting compressed modules.
+Do not change PMI, Corium, or unrelated security and interrupt behavior.
 
 ## Interface
 
@@ -40,7 +41,11 @@ checked.
 Module options require a static ELF init. Reject an explicit tree without
 selections, module selections without an init, and module options with a
 complete archive, compressed or otherwise. No selections means no release
-lookup or module-tree discovery and no change to existing behavior.
+lookup or module-tree discovery. Complete archives are checked for compressed
+module names anywhere; any `.ko.<extension>` filename with a nonempty
+extension fails the build, including unknown formats.
+Arma does not rewrite supplied archives. Plain modules in supplied archives
+pass through as supplied.
 
 ## Resolution and packaging
 
@@ -77,19 +82,16 @@ files without reading those indexes. Print the target release, chosen
 source tree, built-in selections, and included files, distinguishing roots
 from dependencies.
 
-Require `CONFIG_MODULES=y` for loadable payloads. Use the kernel configuration
-from `--config` or the kernel's embedded IKCONFIG. Preserve compressed names
-and bytes exactly when `CONFIG_MODULE_DECOMPRESS=y` and the matching
-`CONFIG_MODULE_COMPRESS_XZ`, `GZIP`, or `ZSTD` option is also `y`. Otherwise,
-decompress only the selected modules and their resolved hard dependencies on
-the host, storing them as plain `.ko` files. Unselected modules are never
-decompressed or checked for kernel decompression support. Plain `.ko` bytes
-remain unchanged. Decompressed output is limited to 64 MiB per module;
-XZ decoder memory and zstd windows are also capped at 64 MiB. Invalid streams
-and streams exceeding these limits fail with the selected module's path.
-No module indexes are generated or packed, so there are no index paths to
-rewrite. Release matching does not prove ABI, modversion or signing
-compatibility.
+Require `CONFIG_MODULES=y` for loadable payloads, using `--config` or
+embedded IKCONFIG. Always decode `.ko.gz`, `.ko.xz` and `.ko.zst` on the
+host to plain `.ko`, regardless of guest decompressor options. Preserve
+plain and decoded bytes exactly, including appended signatures; do not
+strip or re-sign. Reject unsupported suffixes, magic mismatches and malformed
+streams before writing output, preserving an existing destination on failure.
+Limit combined output across concatenated streams to 64 MiB per module;
+cap XZ memory and zstd windows at 64 MiB. Decode only selected payloads.
+Source trees are read-only inputs. Release matching does not prove ABI,
+modversion or signing compatibility.
 
 The first version does not implement firmware collection, module parameters,
 modprobe configuration, aliases, softdep ordering, or runtime-requested
@@ -108,7 +110,7 @@ remain unchanged when a transport is modular.
   resolution, safe file inventory and bounded host decompression.
 - `initrd`: bounded deterministic newc emission, without changing archive
   pass-through.
-- `kconfig`: built-in module/decompression configuration checks.
+- `kconfig`: built-in module configuration check.
 - `main` and `build`: argument validation and orchestration before PMI layout.
 
 ## Acceptance criteria
@@ -124,7 +126,9 @@ remain unchanged when a transport is modular.
    missing files, ambiguous names, malformed metadata and cycles are tested.
 5. Traversal, symlinks, nonregular files and unsupported suffixes are rejected.
 6. Archive entry paths, modes, ownership, timestamps, byte preservation,
-   compression requirements, size bounds and determinism are tested.
+   unconditional decompression, signature preservation, size bounds and
+   determinism are tested. Unsupported formats and compressed modules inside
+   supplied archives fail without replacing output.
 7. CLI tests exercise valid selections and incompatible/negative inputs;
    inspect the PMI initrd payload and DTB initrd extent, not just CLI status.
 8. A real matching kernel/module set is packaged. An actual Corium VM run

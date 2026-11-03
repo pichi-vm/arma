@@ -190,10 +190,9 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
             eprintln!("arma: built-in module: {name}");
         }
         for file in &mut selection.files {
-            let packing = kcfg
-                .check_module(&file.relative)
+            kcfg.check_module(&file.relative)
                 .context("selected module kernel support")?;
-            packing.pack(file).context("prepare selected module")?;
+            file.unpack().context("prepare selected module")?;
             let kind = if file.is_root {
                 "selected"
             } else {
