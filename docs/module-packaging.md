@@ -46,9 +46,10 @@ lookup or module-tree discovery and no change to existing behavior.
 
 Read mandatory `modules.dep` and `modules.builtin` from the selected tree. Resolve
 named roots plus their transitive loadable hard dependencies; built-in
-roots require no payload. Reject missing or ambiguous names, broken
-references, cycles, malformed metadata, and unsafe paths. Validate the entire
-index, including unselected definitions and referenced files, rather than
+roots require no payload. Reject missing or ambiguous requested names. Other
+names may repeat: dependencies identify files by their full relative paths.
+Reject broken references, cycles, malformed metadata, and unsafe paths. Validate
+the entire index, including unselected definitions and referenced files, rather than
 silently ignoring a broken tree. Deduplicate and sort the result. Do not
 require host `modprobe` or `depmod`. An all-built-in selection is valid and
 produces the ordinary static-init archive with no module payloads.

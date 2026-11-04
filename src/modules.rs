@@ -173,13 +173,13 @@ pub(crate) fn resolve(
         if definitions.insert(path.to_owned(), edges).is_some() {
             return Err(ModuleError(format!("duplicate definition {path:?}")));
         }
-        insert_name(&mut names, name, Some(path.to_owned()))?;
+        insert_name(&mut names, &roots, name, Some(path.to_owned()))?;
     }
     for line in metadata(&tree, "modules.builtin")?.lines() {
         if line.is_empty() {
             continue;
         }
-        insert_name(&mut names, module_path(line)?, None)?;
+        insert_name(&mut names, &roots, module_path(line)?, None)?;
     }
     // Validate the whole index, not only the chosen branch.
     for (path, dependencies) in &definitions {
@@ -270,10 +270,11 @@ fn discover(release: &str, roots: &[PathBuf]) -> Result<PathBuf, ModuleError> {
 
 fn insert_name(
     names: &mut BTreeMap<String, Option<String>>,
+    roots: &BTreeSet<String>,
     name: String,
     path: Option<String>,
 ) -> Result<(), ModuleError> {
-    if names.insert(name.clone(), path).is_some() {
+    if roots.contains(&name) && names.insert(name.clone(), path).is_some() {
         return Err(ModuleError(format!("ambiguous module name {name:?}")));
     }
     Ok(())
@@ -599,6 +600,31 @@ mod tests {
         // A dependency explicitly requested as a root retains that role.
         let result = select(tree.path(), &["root-mod", "helper", "root_mod"]).unwrap();
         assert!(result.files.iter().all(|file| file.is_root));
+    }
+
+    #[test]
+    fn unrequested_ambiguous_names_do_not_block_path_dependencies() {
+        let tree = fixture(
+            "kernel/root.ko: kernel/drivers/perf/arm-cci.ko\nkernel/drivers/perf/arm-cci.ko:\n",
+            "kernel/drivers/bus/arm-cci.ko\n",
+            &["kernel/root.ko", "kernel/drivers/perf/arm-cci.ko"],
+        );
+        let result = select(tree.path(), &["root"]).unwrap();
+        assert_eq!(
+            result
+                .files
+                .iter()
+                .map(|file| file.relative.as_path())
+                .collect::<Vec<_>>(),
+            [
+                Path::new("kernel/drivers/perf/arm-cci.ko"),
+                Path::new("kernel/root.ko")
+            ]
+        );
+        assert_eq!(
+            select(tree.path(), &["arm_cci"]).unwrap_err().to_string(),
+            "ambiguous module name \"arm_cci\""
+        );
     }
 
     #[test]
