@@ -46,3 +46,14 @@ Path("module.ko.zst").write_bytes(subprocess.run(
     ["zstd", "-q", "-c"], input=payload, check=True, capture_output=True,
 ).stdout)
 ```
+
+`signed.ko.xz` and `signed.ko.zst` decode to
+`b"\x00ELF-like module\xff\x00signature bytes\x01\x02\x00~Module signature appended~\n"`.
+They were generated with the same Python XZ call and libzstd's
+`ZSTD_compress` at level 3. These synthetic bytes test complete signature-byte
+preservation, not cryptographic signature validation. Concatenated-stream
+coverage uses the smaller `module.ko.*` fixtures.
+
+`compressed-module.cpio` contains two concatenated newc archives: `init`, then
+`extra/bad.ko.gz`, each ending with `TRAILER!!!`. Entries have zero ownership/time,
+mode 0100644 and four-byte alignment. It tests rejection outside module roots.

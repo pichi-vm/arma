@@ -6,7 +6,8 @@
 //! Accepts two input shapes:
 //!
 //! 1. A complete cpio newc archive, uncompressed or gzip/zstd compressed —
-//!    validated and passed through unchanged. Linux decompresses it at boot.
+//!    validated and passed through. Compressed module entries are rejected;
+//!    Linux decompresses an accepted outer archive at boot.
 //! 2. A statically-linked ELF executable — wrapped in a single-entry
 //!    cpio newc archive containing `/`, `/dev`, `/dev/console`, `/init`
 //!    and `TRAILER!!!`.
@@ -66,6 +67,9 @@ pub(crate) enum InitrdError {
     #[error("malformed or truncated cpio newc initramfs")]
     MalformedArchive,
 
+    #[error("compressed module {0} in supplied initramfs; supply plain .ko modules")]
+    CompressedModule(String),
+
     #[error("initramfs decompression failed: {0}")]
     Decompress(#[from] std::io::Error),
 
@@ -107,7 +111,8 @@ fn check_static_elf(bytes: &[u8]) -> Result<(), InitrdError> {
 
 /// Materialize an initramfs from the raw input. If the input is
 /// already cpio, the original slice is returned borrowed (no copy —
-/// large initrds can be many MiB). If the input is a static ELF, it
+/// large initrds can be many MiB). Compressed module filenames anywhere
+/// in the archive are rejected. If the input is a static ELF, it
 /// is wrapped in a single-entry cpio archive at `/init`. Any other
 /// input is rejected.
 ///
@@ -115,7 +120,7 @@ fn check_static_elf(bytes: &[u8]) -> Result<(), InitrdError> {
 /// are preserved, so the kernel needs the matching CONFIG_RD_GZIP/ZSTD driver.
 pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
     if is_cpio(input) {
-        validate_cpio(input).ok_or(InitrdError::MalformedArchive)?;
+        validate_cpio(input)?;
         return Ok(Cow::Borrowed(input));
     }
     if input.starts_with(&[0x1f, 0x8b]) {
@@ -125,7 +130,7 @@ pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
             flate2::bufread::GzDecoder::new(&mut remaining).read_to_end(&mut decoded)?;
             remaining = skip_padding(remaining);
         }
-        validate_cpio(&decoded).ok_or(InitrdError::MalformedArchive)?;
+        validate_cpio(&decoded)?;
         return Ok(Cow::Borrowed(input));
     }
     if input.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
@@ -158,7 +163,7 @@ pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
             }
             remaining = skip_padding(decoder.into_inner());
         }
-        validate_cpio(&decoded).ok_or(InitrdError::MalformedArchive)?;
+        validate_cpio(&decoded)?;
         return Ok(Cow::Borrowed(input));
     }
     if is_elf(input) {
@@ -219,7 +224,7 @@ pub(crate) fn materialize_modules(
                 .ok_or_else(|| InitrdError::ModulePath(module.path.display().to_string()))?;
             parts.push(part);
         }
-        if parts.is_empty() {
+        if parts.is_empty() || parts.last().is_some_and(|name| name.contains(".ko.")) {
             return Err(InitrdError::ModulePath(module.path.display().to_string()));
         }
         let path = format!("usr/lib/modules/{release}/{}", parts.join("/"));
@@ -315,42 +320,54 @@ fn checked_entry(
 
 /// Check complete newc records, including the trailer, before passing bytes
 /// to Linux. Accept zero padding and concatenated archives as initramfs does.
-/// No extraction or pathname interpretation is needed here.
-fn validate_cpio(mut bytes: &[u8]) -> Option<()> {
+/// Reject compressed module paths without extracting or rewriting the archive.
+fn validate_cpio(mut bytes: &[u8]) -> Result<(), InitrdError> {
+    let malformed = || InitrdError::MalformedArchive;
     loop {
         loop {
-            let header = bytes.get(..110)?;
+            let header = bytes.get(..110).ok_or_else(malformed)?;
             if !header.starts_with(NEWC_MAGIC) {
-                return None;
+                return Err(malformed());
             }
             let mut fields = [0u32; 13];
             for (field, hex) in fields.iter_mut().zip(header[6..].as_chunks::<8>().0) {
                 if !hex.iter().all(u8::is_ascii_hexdigit) {
-                    return None;
+                    return Err(malformed());
                 }
-                *field = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                *field =
+                    u32::from_str_radix(std::str::from_utf8(hex).map_err(|_| malformed())?, 16)
+                        .map_err(|_| malformed())?;
             }
-            let size = usize::try_from(fields[6]).ok()?;
-            let namesize = usize::try_from(fields[11]).ok()?;
-            let name_end = 110usize.checked_add(namesize)?;
-            let name = bytes.get(110..name_end)?;
+            let size = usize::try_from(fields[6]).map_err(|_| malformed())?;
+            let namesize = usize::try_from(fields[11]).map_err(|_| malformed())?;
+            let name_end = 110usize.checked_add(namesize).ok_or_else(malformed)?;
+            let name = bytes.get(110..name_end).ok_or_else(malformed)?;
             if name.last() != Some(&0) || name[..name.len() - 1].contains(&0) || fields[12] != 0 {
-                return None;
+                return Err(malformed());
             }
-            let data_start = name_end.checked_add(3)? & !3;
-            let data_end = data_start.checked_add(size)?;
-            let next = data_end.checked_add(3)? & !3;
-            bytes = bytes.get(next..)?;
+            let data_start = name_end.checked_add(3).ok_or_else(malformed)? & !3;
+            let data_end = data_start.checked_add(size).ok_or_else(malformed)?;
+            let next = data_end.checked_add(3).ok_or_else(malformed)? & !3;
+            bytes = bytes.get(next..).ok_or_else(malformed)?;
+            let path = String::from_utf8_lossy(&name[..name.len() - 1]);
+            if path
+                .rsplit('/')
+                .find(|part| !part.is_empty() && *part != ".")
+                .and_then(|name| name.split_once(".ko."))
+                .is_some_and(|(_, ext)| !ext.is_empty())
+            {
+                return Err(InitrdError::CompressedModule(path.into_owned()));
+            }
             if name == b"TRAILER!!!\0" {
                 if size != 0 {
-                    return None;
+                    return Err(malformed());
                 }
                 break;
             }
         }
         bytes = skip_padding(bytes);
         if bytes.is_empty() {
-            return Some(());
+            return Ok(());
         }
     }
 }
@@ -449,7 +466,7 @@ mod tests {
             bytes: payload,
         }];
         let archive = materialize_modules(&binary, "7.2-test", &files).unwrap();
-        assert!(validate_cpio(&archive).is_some());
+        assert!(validate_cpio(&archive).is_ok());
         let entries = inspect_newc(&archive);
         assert_eq!(entries["init"].0, binary);
         assert_eq!(
@@ -476,11 +493,11 @@ mod tests {
     }
 
     #[test]
-    fn module_archive_is_order_independent_and_preserves_compression() {
+    fn module_archive_is_order_independent_and_preserves_bytes() {
         let binary = synth_elf(&[]);
         let a = Module {
-            path: std::path::Path::new("kernel/a.ko.zst"),
-            bytes: b"compressed bytes",
+            path: std::path::Path::new("kernel/a.ko"),
+            bytes: b"plain module bytes",
         };
         let b = Module {
             path: std::path::Path::new("extra/b.ko"),
@@ -496,20 +513,20 @@ mod tests {
                     bytes: b"uncompressed bytes",
                 },
                 Module {
-                    path: std::path::Path::new("kernel/a.ko.zst"),
-                    bytes: b"compressed bytes",
+                    path: std::path::Path::new("kernel/a.ko"),
+                    bytes: b"plain module bytes",
                 },
                 Module {
-                    path: std::path::Path::new("kernel/a.ko.zst"),
-                    bytes: b"compressed bytes",
+                    path: std::path::Path::new("kernel/a.ko"),
+                    bytes: b"plain module bytes",
                 },
             ],
         )
         .unwrap();
         assert_eq!(first, second);
         assert_eq!(
-            inspect_newc(&first)["usr/lib/modules/7.2-test/kernel/a.ko.zst"].0,
-            b"compressed bytes"
+            inspect_newc(&first)["usr/lib/modules/7.2-test/kernel/a.ko"].0,
+            b"plain module bytes"
         );
         assert_eq!(
             materialize_modules(&binary, "7.2-test", &[]).unwrap(),
@@ -525,6 +542,7 @@ mod tests {
             "/absolute.ko",
             "C:\\escape.ko",
             "bad\nname.ko",
+            "bad.ko.gz",
             "",
         ] {
             let modules = [Module {
@@ -765,6 +783,38 @@ mod tests {
     }
 
     #[test]
+    fn supplied_archives_reject_compressed_module_names_anywhere() {
+        use std::io::Write;
+        for suffix in ["gz", "xz", "zst", "bz2", "gz.ko.", "gz/", "gz/.", ""] {
+            let name = format!("extra/bad.ko.{suffix}");
+            let mut plain = wrap_as_cpio(b"init");
+            cpio_entry(&mut plain, 5, 0o100_644, 1, &name, b"module", None);
+            cpio_entry(&mut plain, 0, 0, 1, "TRAILER!!!", b"", None);
+            let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            gzip.write_all(&plain).unwrap();
+            let zstd = ruzstd::encoding::compress_to_vec(
+                plain.as_slice(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            );
+            for input in [plain, gzip.finish().unwrap(), zstd] {
+                if suffix.is_empty() {
+                    assert_eq!(materialize(&input).unwrap().as_ref(), input);
+                } else {
+                    assert!(
+                        matches!(materialize(&input), Err(InitrdError::CompressedModule(path)) if path == name)
+                    );
+                }
+            }
+        }
+        for name in ["extra/good.ko", "extra/good.gz", "extra/good.ko.gz/plain"] {
+            let mut plain = Vec::new();
+            cpio_entry(&mut plain, 1, 0o100_644, 1, name, b"module", None);
+            cpio_entry(&mut plain, 0, 0, 1, "TRAILER!!!", b"", None);
+            assert_eq!(materialize(&plain).unwrap().as_ref(), plain);
+        }
+    }
+
+    #[test]
     fn validates_zstd_headers_with_and_without_content_size_or_checksum() {
         let frame = include_bytes!("../tests/data/initramfs.cpio.zst");
         for offset in [4, 5] {
@@ -824,7 +874,7 @@ mod tests {
         bad_name[114] = b'!';
         assert!(materialize(&bad_name).is_err());
         let wrapped = wrap_as_cpio(b"test executable");
-        assert!(validate_cpio(&wrapped).is_some());
+        assert!(validate_cpio(&wrapped).is_ok());
     }
 
     #[test]

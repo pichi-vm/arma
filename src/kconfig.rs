@@ -164,35 +164,15 @@ impl KernelConfig {
         decoded
     }
 
-    /// Keep compressed bytes for `finit_module` only when the kernel has all
-    /// required decompression facilities built in; otherwise unpack on the host.
-    pub(crate) fn check_module(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<crate::modules::ModulePacking, ModuleConfigError> {
-        use crate::modules::ModulePacking;
-
-        let require = |option| {
-            if self.is_builtin(option) {
-                Ok(())
-            } else {
-                Err(ModuleConfigError {
-                    path: path.to_owned(),
-                    option,
-                })
-            }
-        };
-        require("CONFIG_MODULES")?;
-        let (packing, option) = match path.extension().and_then(|ext| ext.to_str()) {
-            Some("xz") => (ModulePacking::Xz, "CONFIG_MODULE_COMPRESS_XZ"),
-            Some("gz") => (ModulePacking::Gzip, "CONFIG_MODULE_COMPRESS_GZIP"),
-            Some("zst") => (ModulePacking::Zstd, "CONFIG_MODULE_COMPRESS_ZSTD"),
-            _ => return Ok(ModulePacking::Keep),
-        };
-        if self.is_builtin("CONFIG_MODULE_DECOMPRESS") && self.is_builtin(option) {
-            Ok(ModulePacking::Keep)
+    /// Loadable modules require kernel module support; decoding is a host task.
+    pub(crate) fn check_module(&self, path: &std::path::Path) -> Result<(), ModuleConfigError> {
+        if self.is_builtin("CONFIG_MODULES") {
+            Ok(())
         } else {
-            Ok(packing)
+            Err(ModuleConfigError {
+                path: path.to_owned(),
+                option: "CONFIG_MODULES",
+            })
         }
     }
 
@@ -544,42 +524,14 @@ CONFIG_CMDLINE="\"bootconfig\"""#,
     }
 
     #[test]
-    fn selected_module_compression_requires_builtin_kernel_support() {
-        use crate::modules::ModulePacking;
-        let none = KernelConfig::parse(String::new());
-        assert!(none.check_module(std::path::Path::new("test.ko")).is_err());
-        let modules = KernelConfig::parse("CONFIG_MODULES=y\n".to_owned());
-        assert_eq!(
-            modules
-                .check_module(std::path::Path::new("test.ko"))
-                .unwrap(),
-            ModulePacking::Keep
-        );
-        for (suffix, symbol, unpack) in [
-            ("xz", "XZ", ModulePacking::Xz),
-            ("gz", "GZIP", ModulePacking::Gzip),
-            ("zst", "ZSTD", ModulePacking::Zstd),
-        ] {
-            let path = std::path::PathBuf::from(format!("test.ko.{suffix}"));
-            assert_eq!(modules.check_module(&path).unwrap(), unpack);
-            for decompress in ["y", "m", "n"] {
-                for codec in ["y", "m", "n"] {
-                    let cfg = KernelConfig::parse(format!(
-                        "CONFIG_MODULES=y\nCONFIG_MODULE_DECOMPRESS={decompress}\nCONFIG_MODULE_COMPRESS_{symbol}={codec}\n"
-                    ));
-                    assert_eq!(
-                        cfg.check_module(&path).unwrap(),
-                        if decompress == "y" && codec == "y" {
-                            ModulePacking::Keep
-                        } else {
-                            unpack
-                        }
-                    );
-                }
-            }
-            for modules in ["m", "n"] {
-                let cfg = KernelConfig::parse(format!("CONFIG_MODULES={modules}\n"));
-                assert!(cfg.check_module(&path).is_err());
+    fn selected_modules_require_builtin_module_support() {
+        for value in ["y", "m", "n"] {
+            let cfg = KernelConfig::parse(format!("CONFIG_MODULES={value}\n"));
+            for path in ["test.ko", "test.ko.gz", "test.ko.xz", "test.ko.zst"] {
+                assert_eq!(
+                    cfg.check_module(std::path::Path::new(path)).is_ok(),
+                    value == "y"
+                );
             }
         }
     }

@@ -18,6 +18,49 @@ type CpuState = vcpu::aarch64::CpuState;
 
 const GRAN: u64 = 2 * 1024 * 1024;
 
+#[test]
+fn supplied_archives_reject_compressed_modules_without_replacing_output() {
+    use std::io::Write;
+    let (kernel, config) = common::host_kernel().expect("real host kernel and config available");
+    let dir = TempDir::new().unwrap();
+    let initrd = dir.path().join("initramfs");
+    let output = dir.path().join("boot.pmi");
+    let build = || {
+        Command::new(common::arma_bin())
+            .args(["build", "--kernel"])
+            .arg(kernel)
+            .arg("--config")
+            .arg(config)
+            .args(["--cmdline", "console=hvc0", "--initrd"])
+            .arg(&initrd)
+            .arg(&output)
+            .output()
+            .unwrap()
+    };
+    let plain = include_bytes!("data/compressed-module.cpio").as_slice();
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(plain).unwrap();
+    std::fs::write(&initrd, gzip.finish().unwrap()).unwrap();
+    for existing in [false, true] {
+        if existing {
+            std::fs::write(&output, b"previous PMI").unwrap();
+        }
+        let result = build();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("compressed module") && stderr.contains("extra/bad.ko.gz"),
+            "{stderr}"
+        );
+        if existing {
+            assert_eq!(std::fs::read(&output).unwrap(), b"previous PMI");
+            std::fs::remove_file(&output).unwrap();
+        } else {
+            assert!(!output.exists());
+        }
+    }
+}
+
 #[rstest]
 #[case(include_bytes!("data/initramfs.cpio").as_slice())]
 #[case(include_bytes!("data/initramfs.cpio.gz").as_slice())]
