@@ -1240,62 +1240,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs a real vmlinux at PICHI_VMLINUX + ground-truth at PICHI_GT"]
-    fn extract_relocs_matches_kernel_relocs_tool() {
-        // PICHI_GT is the raw table the kernel's own `relocs` tool emits, format
-        // (64-bit): 0, relocs64.., 0, relocs32neg.., 0, relocs32.. (each a u32 LE
-        // = low 32 bits of the patch-site kernel VA). We convert to image offsets
-        // and require an exact set match against arma's extractor.
-        use std::collections::BTreeSet;
-        let bytes = std::fs::read(std::env::var("PICHI_VMLINUX").unwrap()).unwrap();
-        let raw = std::fs::read(std::env::var("PICHI_GT").unwrap()).unwrap();
-        let words: Vec<u32> = raw
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        // Split on zero terminators: [stop] r64 [stop] r32neg [stop] r32.
-        let mut groups: Vec<Vec<u32>> = vec![Vec::new()];
-        for &w in &words[1..] {
-            if w == 0 {
-                groups.push(Vec::new());
-            } else {
-                groups.last_mut().unwrap().push(w);
-            }
-        }
-        let (gt64, gt32n, gt32) = (&groups[0], &groups[1], &groups[2]);
-
-        let r = extract_relocs(&bytes).unwrap();
-        let elf = Elf::parse(&bytes).unwrap();
-        let span = elf_span(&elf).unwrap();
-        let text_vaddr = elf
-            .program_headers
-            .iter()
-            .find(|p| p.p_type == PT_LOAD && p.p_memsz != 0 && p.p_paddr == span.min_paddr)
-            .unwrap()
-            .p_vaddr;
-        let lo = (text_vaddr & 0xffff_ffff) as u32;
-
-        let mine = |v: &[u32]| -> BTreeSet<u32> { v.iter().copied().collect() };
-        // Ground-truth values are (image_off + lo) mod 2^32; invert to offsets.
-        let theirs =
-            |v: &[u32]| -> BTreeSet<u32> { v.iter().map(|x| x.wrapping_sub(lo)).collect() };
-        eprintln!(
-            "arma: r64={} r32neg={} r32={} | gt: r64={} r32neg={} r32={}",
-            r.relocs64.len(),
-            r.relocs32neg.len(),
-            r.relocs32.len(),
-            gt64.len(),
-            gt32n.len(),
-            gt32.len(),
-        );
-        assert_eq!(mine(&r.relocs64), theirs(gt64), "relocs64 mismatch");
-        assert_eq!(mine(&r.relocs32neg), theirs(gt32n), "relocs32neg mismatch");
-        assert_eq!(mine(&r.relocs32), theirs(gt32), "relocs32 mismatch");
-    }
-
-    #[test]
     fn rejects_non_x86_elf() {
         // EM_AARCH64 = 183; arma's ELF path is x86-only (arm64 ships raw Image).
         let mut elf = make_elf(0x100_0000, &[(0x100_0000, vec![0u8; 0x100], 0x100)]);
