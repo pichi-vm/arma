@@ -1,0 +1,59 @@
+#!/usr/bin/make -f
+
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_NET_OFFLINE = true
+export CARGO_TARGET_DIR = $(CURDIR)/target
+export RUSTC_BOOTSTRAP = 1
+# Global Rust flags override target flags, including the private sysroot.
+unexport RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+HOST_RUSTFLAGS := $(shell dpkg-buildflags --get RUSTFLAGS)
+NONE_SYSROOT = $(CURDIR)/debian/none-sysroot
+
+DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+ifeq ($(DEB_HOST_ARCH),amd64)
+TATU_TARGET = x86_64-unknown-none
+export CARGO_TARGET_X86_64_UNKNOWN_NONE_LINKER = ld.lld
+TATU_RUSTFLAGS = CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = $(HOST_RUSTFLAGS)
+else ifeq ($(DEB_HOST_ARCH),arm64)
+TATU_TARGET = aarch64-unknown-none-softfloat
+export CARGO_TARGET_AARCH64_UNKNOWN_NONE_SOFTFLOAT_LINKER = ld.lld
+TATU_RUSTFLAGS = CARGO_TARGET_AARCH64_UNKNOWN_NONE_SOFTFLOAT_RUSTFLAGS
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = $(HOST_RUSTFLAGS)
+endif
+
+%:
+	dh $@ --buildsystem=none
+
+override_dh_auto_build:
+	rm -rf debian/none-target "$(NONE_SYSROOT)"
+	# Bootstrap only the bare-metal target; keep the distro host std intact.
+	CARGO_TARGET_DIR=$(CURDIR)/debian/none-target cargo --config .cargo/vendor.toml -Z build-std=core build \
+		--frozen --release -p tatu --target $(TATU_TARGET)
+	install -d "$(NONE_SYSROOT)/lib/rustlib/$(TATU_TARGET)/lib"
+	install -m644 debian/none-target/$(TATU_TARGET)/release/deps/libcore-*.rlib \
+		debian/none-target/$(TATU_TARGET)/release/deps/libcompiler_builtins-*.rlib \
+		"$(NONE_SYSROOT)/lib/rustlib/$(TATU_TARGET)/lib/"
+	$(TATU_RUSTFLAGS)="--sysroot=$(NONE_SYSROOT) -C linker=ld.lld" \
+		cargo --config .cargo/vendor.toml build --frozen --release --bin arma
+
+override_dh_auto_test:
+	target/release/arma --help > /dev/null
+
+override_dh_auto_install:
+	install -Dm755 target/release/arma debian/arma/usr/bin/arma
+	install -Dm644 /usr/share/doc/rust-$(shell rustc --version | cut -d' ' -f2 | cut -d. -f1,2)-src/copyright \
+		debian/arma/usr/share/doc/arma/copyright.rust-src
+
+override_dh_installdocs:
+	dh_installdocs README.md LICENSE
+	find vendor -type f \( -iname 'license*' -o -iname 'licence*' -o \
+	    -iname 'copying*' -o -iname 'notice*' -o -iname 'copyright*' \) \
+	    -exec install -Dm0644 '{}' 'debian/arma/usr/share/doc/arma/dependency-licenses/{}' \;
+
+override_dh_auto_clean:
+	rm -rf target debian/cargo-home debian/none-target debian/none-sysroot
+
+# Cargo checksums cover upstream Cargo.toml.orig files inside vendor/.
+override_dh_clean:
+	dh_clean -Xvendor/

@@ -1,0 +1,23 @@
+The PPA workflow prepares one source branch for Launchpad, as in Corium.
+No compilation or GPG signing happens in GitHub Actions. The generated
+build/ppa branch exists only in Launchpad's arma-ppa repository.
+
+Use the arma recipe, with daily builds disabled, targeting ppa:nmccallum/pichi:
+
+    # git-build-recipe format 0.4 deb-version {debversion}+{time}
+    lp:~nmccallum/pichi-vm/+git/arma-ppa build/ppa
+
+Select Resolute, Stonking and Tenacious, the Ubuntu guest releases with
+kernel 7.0 or newer, and enable amd64 and arm64 in the PPA. Arma is a guest
+image tool; it does not need a Noble host package.
+
+Ubuntu lacks prebuilt Rust libraries for Tatu's bare-metal targets. The
+package builds core from the release's rust-src, then builds Arma with
+that private bare-metal sysroot and the distro's normal host libraries.
+Source preparation vendors both Rust 1.93 and 1.97 library dependencies
+alongside Cargo.lock dependencies, so the same branch builds offline on
+these releases. Update the source-package list when their Rust series changes.
+
+LAUNCHPAD_AUTHORIZATION is the repository OAuth header secret, as in Corium.
+Each main push publishes source and requests recipe builds. CI finishes
+when Launchpad accepts the request; building and publication continue there.
