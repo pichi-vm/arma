@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   source:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -23,9 +24,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish source and request builds
-        env:
-          LAUNCHPAD_AUTHORIZATION: ${{ secrets.LAUNCHPAD_AUTHORIZATION }}
+      - name: Prepare source
         run: |
           # Vendor the standard-library dependencies used by the guest releases.
           echo 'deb http://archive.ubuntu.com/ubuntu stonking main universe' | sudo tee /etc/apt/sources.list.d/arma-rust-src.list
@@ -45,6 +44,10 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -f .cargo/vendor.toml vendor
           git commit -m 'build: prepare PPA source'
+      - name: Publish source and request builds
+        env:
+          LAUNCHPAD_AUTHORIZATION: ${{ secrets.LAUNCHPAD_AUTHORIZATION }}
+        run: |
           token=$(curl -fsS -X POST \
             https://api.launchpad.net/devel/~nmccallum/pichi-vm/+git/arma \
             -d ws.op=issueAccessToken \
