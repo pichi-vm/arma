@@ -15,8 +15,8 @@
 //!   the form distro `vmlinuz` ships, e.g. Alpine `vmlinuz-virt`) is
 //!   unwrapped to its raw Image first; see [`unwrap_zboot`].
 //!
-//! A PE-wrapped Linux `vmlinuz.efi` that is *not* zboot is rejected with a
-//! hint to extract the raw Image.
+//! Unified Kernel Images are unwrapped from their `.linux` PE section before
+//! decompression. Their embedded command line and initrd are not used.
 
 use std::io::Read;
 
@@ -52,6 +52,9 @@ pub(crate) enum KernelError {
          (ARM\\x64 at offset 56), or a gzip bzImage/EFI-zboot wrapper arma can unwrap first."
     )]
     Unrecognized,
+
+    #[error("UKI kernel malformed: {0}")]
+    UkiMalformed(&'static str),
 
     #[error(
         "EFI-zboot payload out of bounds (offset {offset:#x}, size {size:#x}, file {file} bytes)"
@@ -712,6 +715,36 @@ fn extract_appended_relocs(elf: &Elf<'_>, bytes: &[u8]) -> Result<Relocs, Kernel
     })
 }
 
+/// Extract a UKI's kernel without importing its initrd or command line.
+/// Raw kernels and EFI-zboot wrappers pass through unchanged.
+pub(crate) fn unwrap_uki(input: Vec<u8>) -> Result<Vec<u8>, KernelError> {
+    if !input.starts_with(b"MZ")
+        || input.get(4..8) == Some(b"zimg")
+        || input.get(56..60) == Some(&ARM64_IMAGE_MAGIC.to_le_bytes())
+    {
+        return Ok(input);
+    }
+    let pe = goblin::pe::PE::parse(&input)
+        .map_err(|_| KernelError::UkiMalformed("invalid PE headers"))?;
+    let mut sections = pe.sections.iter().filter(|s| s.name == *b".linux\0\0");
+    let Some(section) = sections.next() else {
+        return Ok(input);
+    };
+    if sections.next().is_some() {
+        return Err(KernelError::UkiMalformed("duplicate .linux sections"));
+    }
+    let offset = section.pointer_to_raw_data as usize;
+    let size = section.virtual_size as usize;
+    if size == 0 || size > section.size_of_raw_data as usize {
+        return Err(KernelError::UkiMalformed(".linux is not fully file-backed"));
+    }
+    let payload = offset
+        .checked_add(size)
+        .and_then(|end| input.get(offset..end))
+        .ok_or(KernelError::UkiMalformed(".linux is out of bounds"))?;
+    Ok(payload.to_vec())
+}
+
 /// Unwrap an arm64 EFI-zboot kernel to its raw `Image`.
 ///
 /// `CONFIG_EFI_ZBOOT` kernels are a tiny EFI stub (`MZ`) tagged `zimg` at
@@ -854,6 +887,59 @@ mod tests {
         v[ARM64_IMAGE_MAGIC_OFFSET..ARM64_IMAGE_MAGIC_OFFSET + 4]
             .copy_from_slice(&ARM64_IMAGE_MAGIC.to_le_bytes());
         v
+    }
+
+    fn make_uki(payload: &[u8], count: usize) -> Vec<u8> {
+        let sections: Vec<_> = (0..count)
+            .map(|i| crate::pe::Section {
+                name: ".linux".into(),
+                vaddr: 0x10_0000 + i as u64 * 0x10_0000,
+                virtual_size: payload.len() as u64,
+                data: std::borrow::Cow::Borrowed(payload),
+                characteristics: crate::pe::IMAGE_SCN_CNT_INITIALIZED_DATA
+                    | crate::pe::IMAGE_SCN_MEM_READ,
+                // Keep the exact payload size rather than PMI's padded shape.
+                non_loaded: true,
+            })
+            .collect();
+        crate::pe::build_pe(Arch::Aarch64.pe_machine(), &sections).unwrap()
+    }
+
+    #[test]
+    fn unwraps_uki_before_zboot_decompression() {
+        let image = make_arm64_image();
+        for payload in [image.clone(), make_zboot_raw(&gzip(&image), b"gzip")] {
+            let extracted = unwrap_uki(make_uki(&payload, 1)).unwrap();
+            assert_eq!(extracted, payload); // Exclude PE file-alignment padding.
+            assert_eq!(unwrap_zboot(extracted).unwrap(), image);
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_or_truncated_uki_payloads() {
+        let image = make_arm64_image();
+        assert!(matches!(
+            unwrap_uki(make_uki(&image, 2)),
+            Err(KernelError::UkiMalformed(_))
+        ));
+        let mut uki = make_uki(&image, 1);
+        let pe = goblin::pe::PE::parse(&uki).unwrap();
+        let end = pe.sections[0].pointer_to_raw_data as usize + image.len();
+        uki.truncate(end - 1);
+        assert!(matches!(unwrap_uki(uki), Err(KernelError::UkiMalformed(_))));
+    }
+
+    #[test]
+    fn uki_extraction_preserves_direct_kernel_formats() {
+        let mut image = make_arm64_image();
+        image[..2].copy_from_slice(b"MZ");
+        for input in [
+            image,
+            make_zboot_raw(ZSTD_FRAME_OF_ARM64_IMAGE, b"zstd"),
+            vec![0x55; 1024],
+        ] {
+            assert_eq!(unwrap_uki(input.clone()).unwrap(), input);
+        }
     }
 
     #[test]

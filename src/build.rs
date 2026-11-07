@@ -77,6 +77,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     // ---- Step 1: read inputs ----
     let kernel_bytes = fs::read(&args.kernel_path)
         .with_context(|| format!("read kernel: {}", args.kernel_path.display()))?;
+    let kernel_bytes = kernel::unwrap_uki(kernel_bytes).context("extract kernel from UKI")?;
     // Unwrap an arm64 EFI-zboot kernel to its raw Image (no-op for bzImage /
     // raw Image inputs) so everything downstream sees boot-ready bytes.
     let kernel_bytes = kernel::unwrap_zboot(kernel_bytes).context("kernel decompression")?;
