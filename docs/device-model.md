@@ -537,7 +537,8 @@ with no device-attach surface cannot be used.
 Support is read from the config as: virtio-mmio ⇔ `CONFIG_VIRTIO_MMIO`; PCI ⇔
 `CONFIG_PCI` + `CONFIG_VIRTIO_PCI` (and, on aarch64, the ECAM host driver
 `CONFIG_PCI_HOST_GENERIC`; on x86 base config reaches the bridge through the
-architectural `0xcf8`/`0xcfc` ports regardless).
+architectural `0xcf8`/`0xcfc` ports regardless). Both built-in (`=y`) and modular
+(`=m`) drivers count; the guest must load modules before using their devices.
 
 ### PCI window and address space
 
