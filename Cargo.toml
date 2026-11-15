@@ -58,6 +58,10 @@ tatu = { path = "deps/tatu", artifact = "bin", target = "x86_64-unknown-none" }
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 tatu = { path = "deps/tatu", artifact = "bin", target = "aarch64-unknown-none-softfloat" }
 
+[profile.release]
+lto = "thin"
+strip = true
+
 [workspace]
 members = ["deps/tatu", "deps/tatu/deps/dtb2acpi", "deps/tatu/deps/dtb2e820"]
 
