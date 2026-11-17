@@ -350,7 +350,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         bootconfig: lay.bootconfig.as_ref().map(|r| r.start),
         relocs: lay.relocs.as_ref().map(|r| r.start),
     };
-    let cbor = manifest::build_pmi_vm(arch, &tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
+    let cbor = manifest::build_pmi_vm(&tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
         .context("build CBOR manifest")?;
 
     // Detached mode: the base DTB is delivered out-of-band, so write the
@@ -427,7 +427,84 @@ fn has_earlycon(cmdline: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::serial_earlycon_cmdline;
+    use super::*;
+
+    #[test]
+    fn fixed_entry_survives_manifest_and_pe_assembly() {
+        #[cfg(target_arch = "x86_64")]
+        let (firmware, arch, profile, entry, entry_name) = (
+            crate::TATU_X86_64,
+            kernel::Arch::X86_64,
+            "x86-64-v2",
+            0xffff_fff0u64,
+            ".tatu.reset",
+        );
+        #[cfg(target_arch = "aarch64")]
+        let (firmware, arch, profile, entry, entry_name) = (
+            crate::TATU_AARCH64,
+            kernel::Arch::Aarch64,
+            "armv8.0-a",
+            0u64,
+            ".tatu.entry",
+        );
+        let tatu = tatu::parse(firmware, arch).unwrap();
+        let layout = planner::Layout {
+            serial: None,
+            virtio: Vec::new(),
+            ecam: None,
+            pci_window: None,
+            linux: 0x20_0000..0x40_0000,
+            initrd: None,
+            bootconfig: None,
+            relocs: None,
+        };
+        let gpas = manifest::ActionGpas {
+            linux: layout.linux.start,
+            initrd: None,
+            bootconfig: None,
+            relocs: None,
+        };
+        for mode in [
+            manifest::DtbMode::Attached,
+            manifest::DtbMode::Detached,
+            manifest::DtbMode::Optional,
+        ] {
+            let cbor = manifest::build_pmi_vm(&tatu, gpas, profile, mode).unwrap();
+            let sections = assemble_sections(
+                &tatu,
+                &[0; 4096],
+                &[0; 4096],
+                None,
+                &[],
+                &[0; 4096],
+                &layout,
+                &cbor,
+                mode,
+            );
+            let bytes = pe::build_pe(arch.pe_machine(), &sections).unwrap();
+            let pe = goblin::pe::PE::parse(&bytes).unwrap();
+            let section = pe
+                .sections
+                .iter()
+                .find(|s| s.name().unwrap() == entry_name)
+                .unwrap();
+            assert_ne!(
+                section.characteristics & super::pe::IMAGE_SCN_MEM_EXECUTE,
+                0
+            );
+            assert!(section.virtual_size >= section.size_of_raw_data);
+            assert_eq!(section.virtual_size % 4096, 0);
+            assert_eq!(section.size_of_raw_data % 4096, 0);
+            let offset = usize::try_from(entry - u64::from(section.virtual_address)).unwrap();
+            let disk = section.pointer_to_raw_data as usize + offset;
+            let source = tatu.section(entry_name).unwrap();
+            assert_eq!(&bytes[disk..disk + 16], &source.data[offset..offset + 16]);
+            let spec: pmi::vm::Spec<manifest::Profile> =
+                ciborium::from_reader(cbor.as_slice()).unwrap();
+            assert!(spec.actions.iter().any(|action| matches!(action,
+                pmi::vm::Action::Load(load) if load.section == entry_name && load.gpa == source.vaddr)));
+        }
+    }
 
     #[test]
     fn serial_prepends_plain_earlycon() {
@@ -607,12 +684,11 @@ fn tatu_section_characteristics(name: &str, is_nobits: bool) -> u32 {
     //   .tatu.data   — RW data (rare; tatu's release binary minimizes this)
     //   .tatu.bootinfo — RW (arma writes header at build time; tatu reads)
     //   .tatu.bss    — RW zero (BSS)
-    //   .tatu.reset  — code, RX (x86 reset trampoline at 0xFFFF_F000;
-    //                  on aarch64 it's collapsed into .tatu.text by
-    //                  the linker and never appears here)
+    //   .tatu.reset  — code, RX (x86 reset trampoline at 0xFFFF_F000)
+    //   .tatu.entry  — code, RX (aarch64 entry at GPA 0)
     if is_nobits {
         pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA | pe::IMAGE_SCN_MEM_READ | pe::IMAGE_SCN_MEM_WRITE
-    } else if name.contains(".text") || name == ".tatu.reset" {
+    } else if name.contains(".text") || matches!(name, ".tatu.reset" | ".tatu.entry") {
         pe::IMAGE_SCN_CNT_CODE | pe::IMAGE_SCN_MEM_READ | pe::IMAGE_SCN_MEM_EXECUTE
     } else if name.contains(".rodata") {
         pe::IMAGE_SCN_CNT_INITIALIZED_DATA | pe::IMAGE_SCN_MEM_READ

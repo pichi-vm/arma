@@ -17,7 +17,8 @@
  *     and `.tatu.reset.x86_64`) have no `#[cfg(aarch64)]` static, so their
  *     output sections are empty and the linker drops them *without*
  *     perturbing the location counter — the remaining sections pack tight
- *     from 0.
+ *     from 0, starting with `.tatu.entry` (the reset stub at GPA 0, where the
+ *     PMI `vm` target starts the boot vCPU).
  *
  * NOLOAD = runtime-filled or zero (no file/PMI bytes): guard, stack, the
  * DTB buffers, the pads, ACPI, bss. PROGBITS = const-baked content that
@@ -36,6 +37,7 @@ ENTRY(reset)
  * balloons to ~4 GiB). Phdrs whose sections are dropped on aarch64 emit no
  * segment, so the same block serves both arches. */
 PHDRS {
+    entry_ph    PT_LOAD;
     guard_ph    PT_LOAD;
     stack_ph    PT_LOAD;
     bootinfo_ph PT_LOAD;
@@ -54,6 +56,14 @@ PHDRS {
 }
 
 SECTIONS {
+    /* --- aarch64 reset stub: the PMI `vm` target starts the boot vCPU at
+       PC=0x0, so the stub is the first thing in the image. Absent on x86
+       (no .tatu.reset.aarch64 input), so the section is dropped and the x86
+       layout still starts with the guard at 0. --- */
+    .tatu.entry : ALIGN(4K) {
+        KEEP(*(.tatu.reset.aarch64))
+    } :entry_ph
+
     /* --- internal --- */
     .tatu.guard (NOLOAD) : ALIGN(4K) { KEEP(*(.tatu.guard)) } :guard_ph  /* x86-only */
     .tatu.stack (NOLOAD) : ALIGN(4K) { KEEP(*(.tatu.stack)) } :stack_ph
@@ -86,9 +96,6 @@ SECTIONS {
         . = ALIGN(4K);              /* PMI: SizeOfRawData % 4 KiB == 0 */
     } :rodata_ph
     .tatu.text : ALIGN(4K) {
-        /* aarch64 entry stub first so `reset` is the earliest insn in
-           .text; absent on x86 (which uses .tatu.reset.x86_64 below). */
-        KEEP(*(.tatu.reset.aarch64))
         *(.text .text.*)
         *(.tatu.text .tatu.text.*)
         *(.data .data.*)
@@ -122,3 +129,5 @@ ASSERT(SIZEOF(.tatu.bss) == 0,
        "tatu .bss must be empty — every region is an explicit section in src/sections.rs");
 ASSERT(ADDR(.tatu.text) + SIZEOF(.tatu.text) <= 0x200000,
        "tatu image (through .tatu.text) must fit one 2 MiB slab [0,2M)");
+ASSERT(SIZEOF(.tatu.entry) == 0 || ADDR(.tatu.entry) == 0,
+       "aarch64 reset stub must be at GPA 0 (PMI vm boot state: PC=0)");

@@ -10,13 +10,13 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use devtree::{NodeView, PropertyView, Tree, TreeView};
-use pmi::vm::{Action, FillKind, Spec, vcpu};
+use pmi::vm::{Action, FillKind, Spec};
 use tempfile::TempDir;
 
 #[cfg(target_arch = "x86_64")]
-type CpuState = vcpu::x86_64::CpuState;
+type Profile = pmi::x86_64::Profile;
 #[cfg(target_arch = "aarch64")]
-type CpuState = vcpu::aarch64::CpuState;
+type Profile = pmi::aarch64::Profile;
 
 const GRAN: u32 = 2 * 1024 * 1024;
 const SUPPORT: &str = "CONFIG_BOOT_CONFIG=y\nCONFIG_BLK_DEV_INITRD=y\nCONFIG_PROC_FS=y\n";
@@ -112,7 +112,7 @@ impl Fixture {
             end += GRAN;
         }
         let (offset, len) = common::find_pmi_vm(&bytes);
-        let spec: Spec<CpuState> = ciborium::from_reader(&bytes[offset..offset + len]).unwrap();
+        let spec: Spec<Profile> = ciborium::from_reader(&bytes[offset..offset + len]).unwrap();
         let actions: Vec<_> = spec
             .actions
             .iter()

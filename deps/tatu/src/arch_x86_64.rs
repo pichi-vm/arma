@@ -79,42 +79,105 @@ mod reset {
     #[unsafe(link_section = ".tatu.bootinfo")]
     static BOOTINFO: TatuBootInfo = TatuBootInfo::ZERO;
 
-    /// 16-byte reset trampoline placed at 0xFFFFFFF0 by the linker
-    /// script. Its section is `.tatu.reset.x86_64` (not the shared
-    /// `.tatu.reset`) so the single `linker/tatu.ld` can route the x86
-    /// stub to the architectural reset vector while the aarch64 stub
-    /// folds into `.tatu.text`.
-    ///
-    /// SAFETY: STACK, BOOTINFO, and rust_main all live in the low
-    /// 4 GiB of address space (the main image is in the low 1 MiB).
-    /// `mov esp/edi, imm32` zero-extends into RSP/RDI
-    /// (a long-mode rule for 32-bit destination registers).
-    /// `push imm32` in long mode sign-extends to 64 bits and
-    /// pushes 8 bytes; the main image's top bit is clear, so
-    /// sign-extension matches zero-extension. `ret` pops 8 bytes
-    /// into RIP, transferring control to rust_main with RSP back
-    /// where `mov esp` left it. System V x86_64 ABI: first arg in
-    /// RDI, so rust_main receives `bootinfo: &TatuBootInfo`. The
-    /// stub is exactly 5 + 5 + 5 + 1 = 16 bytes — no padding nops.
-    /// `#[unsafe(no_mangle)]` is the keep-alive anchor: rustc
-    /// drops unreachable naked fns in `#![no_main]` binaries
-    /// regardless of `pub` visibility, and `#[used]` doesn't
-    /// apply to functions. no_mangle exposes the symbol as an
-    /// external linkage point, which both prevents DCE and
-    /// makes the name available to the linker's `ENTRY()`.
+    /// Enable paging and x87/SSE exception coordination (MP).
+    const CR0_ENABLE: u32 = (1 << 31) | (1 << 1);
+    /// PAE enables long-mode paging; OSFXSR and OSXMMEXCPT enable Rust's SSE2.
+    const CR4_ENABLE: u32 = (1 << 5) | (1 << 9) | (1 << 10);
+
+    // x86-64 boot path, in three stages: the reset stub ->
+    // [`trampoline`] -> [`long_entry`] -> `rust_main`.
+    //
+    // Entry state (pmi/spec/x86-64.md, "Boot vCPU"): RIP=0xFFFFFFF0, 32-bit
+    // protected mode, paging off, flat 4 GiB segments, CR0=PE|NE, CR4=MCE,
+    // EFER=SCE|LME|NXE, interrupts disabled. No general-purpose register
+    // value may be relied on. EFER.LME is already set. PMI also supplies
+    // initialized x87/SSE state; the trampoline enables SSE instructions.
+    //
+    // The reset stub exports `reset`, selected by ENTRY(reset) in the linker
+    // script. Stages 2 and 3 are naked Rust functions so the earlier stage can
+    // name them with `sym`: they get mangled, internal symbols and are never
+    // called from Rust.
+    //
+    // SAFETY: every symbol referenced lies in the low 4 GiB (the image sits
+    // at the 1 MiB floor), so the 32-bit immediates hold full addresses, and
+    // in 64-bit mode `mov esp`/`mov edi` zero-extend.
+
+    // Stage 1: reset vector, 0xFFFFFFF0 (placed by linker/tatu.ld). Exactly
+    // 16 bytes. A direct `jmp rel32` to the trampoline would have to wrap
+    // around 4 GiB, which the linker rejects, so jump through EAX.
+    core::arch::global_asm!(
+        ".pushsection .tatu.reset.x86_64, \"ax\", %progbits",
+        ".global reset",
+        "reset:",
+        ".code32",
+        "    mov     eax, offset {trampoline}",       // 5 bytes
+        "    jmp     eax",                            // 2 bytes
+        "    .fill   9, 1, 0xCC",                     // int3 padding to 16
+        ".code64",
+        ".popsection",
+        trampoline = sym trampoline,
+    );
+
+    /// Stage 2: 32-bit protected mode with paging off -> long mode. Its GDTR
+    /// pseudo-descriptor follows the code.
     #[unsafe(naked)]
-    #[unsafe(no_mangle)]
-    #[unsafe(link_section = ".tatu.reset.x86_64")]
-    extern "C" fn reset() -> ! {
+    unsafe extern "C" fn trampoline() -> ! {
         core::arch::naked_asm!(
-            "mov  esp, offset {stack} + {size}",
-            "mov  edi, offset {bootinfo}",
-            "push offset {main}",
-            "ret",
-            stack    = sym crate::sections::STACK,
-            size     = const STACK_SIZE,
-            bootinfo = sym BOOTINFO,
-            main     = sym crate::rust_main,
+            ".code32",
+            // Load tatu's GDT, which holds the 64-bit code descriptor.
+            "    lgdt    [2f]",
+            "",
+            // Enable PAE and SSE. Keep the specified MCE bit intact.
+            "    mov     eax, cr4",
+            "    or      eax, {cr4_enable}",
+            "    mov     cr4, eax",
+            "",
+            // Point CR3 at tatu's identity map of the low 4 GiB.
+            "    mov     eax, offset {pgt}",
+            "    mov     cr3, eax",
+            "",
+            // Enable paging. With EFER.LME already set this activates long
+            // mode, running in compatibility mode until CS is reloaded.
+            "    mov     eax, cr0",
+            "    or      eax, {cr0_enable}",
+            "    mov     cr0, eax",
+            "",
+            // Reload CS with the 64-bit code selector. The data segments
+            // keep their flat descriptors, which 64-bit mode ignores.
+            "    ljmp    {code64}, offset {long_entry}",
+            "",
+            // GDTR pseudo-descriptor for the `lgdt` above.
+            "    .balign 4",
+            "2:",
+            "    .word   {gdt_limit}",                // limit
+            "    .long   {gdt}",                      // base
+            ".code64",
+            cr4_enable = const CR4_ENABLE,
+            pgt        = sym crate::bootmem::PGTABLE,
+            cr0_enable = const CR0_ENABLE,
+            code64     = const crate::bootmem::CODE64_SELECTOR,
+            long_entry = sym long_entry,
+            gdt_limit  = const crate::bootmem::GDT_LIMIT,
+            gdt        = sym crate::bootmem::GDT,
+        )
+    }
+
+    /// Stage 3: 64-bit entry. Set the stack and call into Rust.
+    #[unsafe(naked)]
+    unsafe extern "C" fn long_entry() -> ! {
+        core::arch::naked_asm!(
+            "    mov     ax, 0x10",                           // Tatu data selector
+            "    mov     ds, ax",
+            "    mov     es, ax",
+            "    mov     ss, ax",
+            "    mov     esp, offset {stack} + {stack_size}", // top of STACK
+            "    mov     edi, offset {bootinfo}",            // arg 0: &BOOTINFO
+            "    call    {rust_main}",                      // SysV entry: RSP % 16 == 8
+            "    ud2",                                      // rust_main never returns
+            stack      = sym crate::sections::STACK,
+            stack_size = const STACK_SIZE,
+            bootinfo   = sym BOOTINFO,
+            rust_main  = sym crate::rust_main,
         )
     }
 }

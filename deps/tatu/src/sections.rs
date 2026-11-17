@@ -222,8 +222,8 @@ pub(crate) static ROMPAD: PageCell<Paged<[u8; 60 * 1024]>> = PageCell::new(Paged
 pub(crate) static RESET_PAD: PageCell<[u8; 0xFF0]> = PageCell::new([0; 0xFF0]);
 
 // ---------------------------------------------------------------------------
-// Stack — its own section on both arches, placed first (after the x86 guard)
-// so an underflow walks toward GPA 0. On x86 its size is the flex filler
+// Stack — placed after the x86 guard or the aarch64 entry page.
+// An x86 underflow walks toward GPA 0; an aarch64 underflow reaches entry code. On x86 its size is the flex filler
 // that makes conventional RAM end exactly at 640 KiB (maximising the stack);
 // aarch64 has no such boundary, so it is a plain fixed size.
 // ---------------------------------------------------------------------------
