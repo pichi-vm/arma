@@ -9,7 +9,7 @@ use std::fs;
 use std::sync::OnceLock;
 
 use ciborium::de::from_reader;
-use pmi::vm::{Action, FillKind, Spec, vcpu};
+use pmi::vm::{Action, FillKind, Spec};
 #[cfg(target_arch = "x86_64")]
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -107,7 +107,7 @@ fn pmi_core_conformance_x86() {
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
-    let spec: Spec<vcpu::x86_64::CpuState> = from_reader(cbor).expect("decode");
+    let spec: Spec<pmi::x86_64::Profile> = from_reader(cbor).expect("decode");
 
     let sec_names: std::collections::HashSet<String> = pe
         .sections
@@ -124,7 +124,7 @@ fn pmi_core_conformance_x86() {
         referenced.push(n);
         assert!(sec_names.contains(n), "missing section `{n}`");
     }
-    // Pairwise non-overlap (u64 to handle .tatu.reset at 0xFFFFF000 + 4 KiB = 0x1_0000_0000).
+    // Pairwise non-overlap (u64 to handle .tatu.reset.x86_64 at 0xFFFFF000 + 4 KiB = 0x1_0000_0000).
     let ref_set: std::collections::HashSet<&str> = referenced.iter().copied().collect();
     let mut ranges: Vec<(u64, u64)> = pe
         .sections
@@ -151,7 +151,7 @@ fn pmi_core_conformance_aarch64() {
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
-    let spec: Spec<vcpu::aarch64::CpuState> = from_reader(cbor).expect("decode");
+    let spec: Spec<pmi::aarch64::Profile> = from_reader(cbor).expect("decode");
     let sec_names: std::collections::HashSet<String> = pe
         .sections
         .iter()
@@ -238,14 +238,14 @@ fn cbor_round_trip_x86() {
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
-    let spec: Spec<vcpu::x86_64::CpuState> = from_reader(cbor).expect("decode 1");
+    let spec: Spec<pmi::x86_64::Profile> = from_reader(cbor).expect("decode 1");
     // Re-encode and decode again; bytes need not match (CBOR has
     // multiple canonical-ish representations), but the decoded value
     // must be stable.
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&spec, &mut buf).unwrap();
-    let spec2: Spec<vcpu::x86_64::CpuState> = from_reader(buf.as_slice()).expect("decode 2");
-    assert_eq!(spec2.vcpu.rip, spec.vcpu.rip);
+    let spec2: Spec<pmi::x86_64::Profile> = from_reader(buf.as_slice()).expect("decode 2");
+    assert_eq!(spec2.cpu_profile, spec.cpu_profile);
     assert_eq!(spec2.actions.len(), spec.actions.len());
 }
 
@@ -258,11 +258,11 @@ fn cbor_round_trip_aarch64() {
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
     let cbor = &f.pmi_bytes[off..off + size];
-    let spec: Spec<vcpu::aarch64::CpuState> = from_reader(cbor).expect("decode 1");
+    let spec: Spec<pmi::aarch64::Profile> = from_reader(cbor).expect("decode 1");
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&spec, &mut buf).unwrap();
-    let spec2: Spec<vcpu::aarch64::CpuState> = from_reader(buf.as_slice()).expect("decode 2");
-    assert_eq!(spec2.vcpu.pc, spec.vcpu.pc);
+    let spec2: Spec<pmi::aarch64::Profile> = from_reader(buf.as_slice()).expect("decode 2");
+    assert_eq!(spec2.cpu_profile, spec.cpu_profile);
     assert_eq!(spec2.actions.len(), spec.actions.len());
 }
 
@@ -278,7 +278,7 @@ fn manifest_correctness_x86() {
         return;
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
-    let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
+    let spec: Spec<pmi::x86_64::Profile> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     // Default build is optional mode: the `dt:dtb` attribute names the bundled
     // fallback `.dtb`, and a `dt:dtb` fill delivers the base into `.tatu.dtb`.
     assert_eq!(spec.dt_dtb.as_deref(), Some(".dtb"));
@@ -307,7 +307,7 @@ fn manifest_correctness_aarch64() {
         return;
     };
     let (off, size) = find_pmi_vm(&f.pmi_bytes);
-    let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
+    let spec: Spec<pmi::aarch64::Profile> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
     // Default build is optional mode (see the x86 twin for the rationale).
     assert_eq!(spec.dt_dtb.as_deref(), Some(".dtb"));
     assert!(spec.actions.iter().any(|a| matches!(
@@ -463,7 +463,7 @@ fn tatu_sections_present_x86() {
         ".tatu.stack",
         ".tatu.rodata",
         ".tatu.text",
-        ".tatu.reset",
+        ".tatu.reset.x86_64",
     ] {
         assert!(names.contains(must), "missing tatu section `{must}`");
     }
@@ -519,65 +519,41 @@ fn base_dtb_parses_aarch64() {
 }
 
 // ---------------------------------------------------------------------------
-// §15.1 #9 — vm:vcpu register validity.
+// §15.1 #9 — Fixed architecture entry is executable and loaded.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(target_arch = "x86_64")]
-fn vcpu_register_validity_x86() {
-    let Some(f) = x86_fixture() else {
+fn fixed_entry_has_executable_load_action() {
+    #[cfg(target_arch = "x86_64")]
+    type Profile = pmi::x86_64::Profile;
+    #[cfg(target_arch = "aarch64")]
+    type Profile = pmi::aarch64::Profile;
+    #[cfg(target_arch = "x86_64")]
+    let (fixture, section_name, entry) = (x86_fixture(), ".tatu.reset.x86_64", 0xffff_fff0u64);
+    #[cfg(target_arch = "aarch64")]
+    let (fixture, section_name, entry) = (aarch64_fixture(), ".tatu.reset.aarch64", 0u64);
+    let Some(f) = fixture else {
         eprintln!("skip (kernel download failed)");
         return;
     };
-    let (off, size) = find_pmi_vm(&f.pmi_bytes);
-    let spec: Spec<vcpu::x86_64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
-    assert_eq!(spec.vcpu.rip, 0xFFFF_FFF0, "rip is the reset vector");
-    assert_eq!(spec.vcpu.rflags.get() & 0x2, 0x2, "rflags bit 1 must be 1");
-    // gdtr.base equals the .tatu.gdt section's GPA.
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
-    let gdt = pe
+    let section = pe
         .sections
         .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.gdt")
-        .expect(".tatu.gdt present");
-    assert_eq!(spec.vcpu.gdtr.base, gdt.virtual_address as u64);
-    // cr3 equals .tatu.pgt's GPA.
-    let pg = pe
-        .sections
-        .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.pgt")
-        .expect(".tatu.pgt present");
-    assert_eq!(spec.vcpu.cr3, pg.virtual_address as u64);
-}
-
-#[test]
-#[cfg(target_arch = "aarch64")]
-fn vcpu_register_validity_aarch64() {
-    let Some(f) = aarch64_fixture() else {
-        eprintln!("skip (kernel download failed)");
-        return;
-    };
-    let (off, size) = find_pmi_vm(&f.pmi_bytes);
-    let spec: Spec<vcpu::aarch64::CpuState> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
-    // pstate.M[3:0] = 0x5 (EL1h); M[4] = 0 (AArch64).
-    assert_eq!(spec.vcpu.pstate.get() & 0xF, 0x5);
-    assert_eq!((spec.vcpu.pstate.get() >> 4) & 1, 0);
-    // pc lies inside .tatu.text.
-    let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
-    let text = pe
-        .sections
-        .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.text")
-        .expect(".tatu.text present");
-    let lo = text.virtual_address as u64;
-    let hi = lo + text.virtual_size as u64;
-    assert!(
-        spec.vcpu.pc >= lo && spec.vcpu.pc < hi,
-        "pc {:#x} must lie in .tatu.text [{:#x}, {:#x})",
-        spec.vcpu.pc,
-        lo,
-        hi
+        .find(|s| s.name().unwrap() == section_name)
+        .unwrap();
+    assert_ne!(
+        section.characteristics & 0x2000_0000,
+        0,
+        "entry is executable"
     );
+    assert!(entry >= u64::from(section.virtual_address));
+    assert!(entry < u64::from(section.virtual_address) + u64::from(section.size_of_raw_data));
+    let (off, size) = find_pmi_vm(&f.pmi_bytes);
+    let spec: Spec<Profile> = from_reader(&f.pmi_bytes[off..off + size]).unwrap();
+    assert!(spec.actions.iter().any(|action| matches!(action,
+        Action::Load(load) if load.section == section_name
+            && load.gpa == u64::from(section.virtual_address))));
 }
 
 // ---------------------------------------------------------------------------

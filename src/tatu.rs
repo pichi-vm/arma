@@ -5,8 +5,8 @@
 //! PE-section image per `SHF_ALLOC` ELF section.
 //!
 //! Tatu's binary is opaque to arma — arma reads only the section
-//! table (for placement) and the ELF header's `e_entry` (for the
-//! boot vCPU's entry point). Tatu's symbol table is not consulted.
+//! table for placement. Tatu owns its fixed boot entry and CPU setup;
+//! arma does not consult its ELF entry or symbol table.
 
 use core::ops::Range;
 
@@ -40,7 +40,7 @@ pub(crate) struct TatuSection {
     pub(crate) is_dtb: bool,
 }
 
-/// Parsed tatu ELF: the SHF_ALLOC sections to emit and the entry GPA.
+/// Parsed tatu ELF: the SHF_ALLOC sections to emit.
 ///
 /// tatu loads at its linked addresses (it is the immovable part of the
 /// guest-physical map); [`TatuImage::reserved`] yields its section ranges
@@ -48,7 +48,6 @@ pub(crate) struct TatuSection {
 #[derive(Debug)]
 pub(crate) struct TatuImage {
     pub(crate) sections: Vec<TatuSection>,
-    pub(crate) entry: u64,
 }
 
 impl TatuImage {
@@ -160,10 +159,7 @@ pub(crate) fn parse(bytes: &[u8], arch: Arch) -> Result<TatuImage, TatuError> {
     // Sort by vaddr so downstream walks sections in GPA order.
     sections.sort_by_key(|s| s.vaddr);
 
-    Ok(TatuImage {
-        sections,
-        entry: elf.header.e_entry,
-    })
+    Ok(TatuImage { sections })
 }
 
 #[cfg(test)]
@@ -171,12 +167,40 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn firmware_sections_fit_nonoverlapping_slabs() {
+        #[cfg(target_arch = "x86_64")]
+        let image = parse(crate::TATU_X86_64, Arch::X86_64).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        let image = parse(crate::TATU_AARCH64, Arch::Aarch64).unwrap();
+        let ranges: Vec<_> = image.reserved().collect();
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[0].end <= pair[1].start,
+                "overlapping firmware sections"
+            );
+        }
+        for section in &image.sections {
+            assert_eq!(section.vaddr % 4096, 0, "{}", section.name);
+            if section.name == ".tatu.reset.x86_64" {
+                assert_eq!(section.vaddr + section.virtual_size, 0x1_0000_0000);
+            } else {
+                assert!(
+                    section.vaddr + section.virtual_size <= 0x20_0000,
+                    "{} exceeds firmware slab",
+                    section.name
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(target_arch = "x86_64")]
     fn parses_x86_64_tatu_elf() {
         use crate::TATU_X86_64;
         let img = parse(TATU_X86_64, Arch::X86_64).unwrap();
         // Entry MUST be 0xFFFFFFF0 per tatu/x86_64.ld ENTRY(reset).
-        assert_eq!(img.entry, 0xFFFF_FFF0);
+        assert_eq!(Elf::parse(TATU_X86_64).unwrap().header.e_entry, 0xffff_fff0);
         // .tatu.bootinfo MUST be present and exactly 4 KiB.
         let bi = img
             .sections
@@ -184,12 +208,12 @@ mod tests {
             .find(|s| s.is_bootinfo)
             .expect(".tatu.bootinfo section present");
         assert_eq!(bi.virtual_size, 4096);
-        // .tatu.reset MUST end at 0x100000000.
+        // .tatu.reset.x86_64 MUST end at 0x100000000.
         let rv = img
             .sections
             .iter()
-            .find(|s| s.name == ".tatu.reset")
-            .expect(".tatu.reset section present");
+            .find(|s| s.name == ".tatu.reset.x86_64")
+            .expect(".tatu.reset.x86_64 section present");
         assert_eq!(rv.vaddr + rv.virtual_size, 0x1_0000_0000);
         // Sections sorted by vaddr.
         for w in img.sections.windows(2) {
@@ -202,24 +226,14 @@ mod tests {
     fn parses_aarch64_tatu_elf() {
         use crate::TATU_AARCH64;
         let img = parse(TATU_AARCH64, Arch::Aarch64).unwrap();
-        // Entry MUST be inside .tatu.text (which contains the
-        // aarch64 reset stub from .tatu.reset, collapsed in by
-        // the linker's KEEP(*(.tatu.reset)) inside .tatu.text).
-        let text = img
-            .sections
-            .iter()
-            .find(|s| s.name == ".tatu.text")
-            .expect(".tatu.text section present");
-        assert!(
-            img.entry >= text.vaddr && img.entry < text.vaddr + text.virtual_size,
-            "e_entry {:#x} must lie inside .tatu.text [{:#x}, {:#x})",
-            img.entry,
-            text.vaddr,
-            text.vaddr + text.virtual_size
-        );
+        assert_eq!(Elf::parse(TATU_AARCH64).unwrap().header.e_entry, 0);
+        let entry = img.section(".tatu.reset.aarch64").expect("entry section");
+        assert_eq!(entry.vaddr, 0);
+        assert!(!entry.is_nobits);
+        assert!(!entry.data.is_empty());
         // .tatu.bootinfo present.
         assert!(img.sections.iter().any(|s| s.is_bootinfo));
-        // The unified linker packs aarch64 from GPA 0 (stack first).
+        // The unified linker packs aarch64 from GPA 0 (entry first).
         let first = img.sections.first().unwrap();
         assert_eq!(first.vaddr, 0x0);
     }

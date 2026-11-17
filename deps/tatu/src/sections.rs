@@ -9,15 +9,15 @@
 //! script yields the optimal layout on each architecture: the x86-only
 //! legacy/padding sections vanish on aarch64 (an absent section's
 //! placement evaporates — the linker drops it without perturbing the
-//! location counter), and the rest pack tight from 0.
+//! location counter), and the rest pack tight after the reset stub at 0.
 //!
 //! Sizes live in the *types*, so `size_of_val` over the instances derives
 //! the few offsets tatu needs (notably [`PGT_BASE`], the prefix sum to
 //! `.tatu.pgt`). Change a section's type and the layout reflows; the
 //! compile-time `assert!`s pin the x86 architectural boundaries (640 KiB,
 //! 1 MiB) so a size change that would push ACPI out of the reserved zone
-//! fails the build. Addresses are never hardcoded (ARCHITECTURE.md §6.3):
-//! arma reads each section's GPA from tatu's ELF and cross-checks.
+//! fails the build. Tatu owns this layout; arma packages each section at
+//! the GPA declared in tatu's ELF section table.
 
 // `link_section` overrides trip the unsafe-code lint; this whole module is
 // the documented placement contract for `linker/tatu.ld`, not a soundness
@@ -70,12 +70,12 @@ pub(crate) fn dtbm_buf() -> &'static mut [u8] {
 // ---------------------------------------------------------------------------
 // x86_64-only sections: the legacy low-memory map. Each is a zero pad over
 // an architectural scan window, or a fixed boot-CPU structure. All vanish
-// on aarch64, so the shared sections above pack contiguously from 0 there.
+// on aarch64, where the stack and shared sections follow the reset stub.
 // ---------------------------------------------------------------------------
 
 /// `.tatu.guard` — 4 KiB at GPA 0. The MP/BDA scan window [0,1K) must read
-/// zero; this keeps the stack off it. Absent on aarch64, so the stack
-/// becomes the first section at GPA 0.
+/// zero; this keeps the stack off it. Absent on aarch64, where the reset
+/// stub occupies GPA 0 and the stack follows it.
 #[cfg(target_arch = "x86_64")]
 #[used]
 #[allow(dead_code)]
@@ -211,8 +211,8 @@ pub(crate) static ROMPAD: PageCell<Paged<[u8; 60 * 1024]>> = PageCell::new(Paged
 
 /// `.tatu.reset.x86_64.pad` — 0xFF0 zero bytes that position the 16-byte
 /// reset stub at the architectural reset vector 0xFFFFFFF0 (the stub
-/// follows this pad in `.tatu.reset`). A static rather than a linker
-/// `. = . + 0xFF0` so the whole `.tatu.reset` section is *genuinely* empty
+/// follows this pad in `.tatu.reset.x86_64`). A static rather than a linker
+/// `. = . + 0xFF0` so the whole `.tatu.reset.x86_64` section is *genuinely* empty
 /// on aarch64 (no nonzero location-counter advance to keep it alive) and
 /// the linker drops it.
 #[cfg(target_arch = "x86_64")]
@@ -222,8 +222,8 @@ pub(crate) static ROMPAD: PageCell<Paged<[u8; 60 * 1024]>> = PageCell::new(Paged
 pub(crate) static RESET_PAD: PageCell<[u8; 0xFF0]> = PageCell::new([0; 0xFF0]);
 
 // ---------------------------------------------------------------------------
-// Stack — its own section on both arches, placed first (after the x86 guard)
-// so an underflow walks toward GPA 0. On x86 its size is the flex filler
+// Stack — placed after the x86 guard or the aarch64 entry page.
+// An x86 underflow walks toward GPA 0; an aarch64 underflow reaches entry code. On x86 its size is the flex filler
 // that makes conventional RAM end exactly at 640 KiB (maximising the stack);
 // aarch64 has no such boundary, so it is a plain fixed size.
 // ---------------------------------------------------------------------------
@@ -261,9 +261,9 @@ pub(crate) static STACK: PageCell<Paged<[u8; STACK_SIZE]>> = PageCell::new(Paged
 
 /// Load GPA of `.tatu.pgt` — derived, not declared: the prefix sum of the
 /// sections that precede it (guard, stack, bootinfo, dtb, dtbo, dtbm). The
-/// page-table self-pointers (`bootmem`) embed this at const-eval time; arma
-/// reads the actual section GPA from the ELF and cross-checks. Change any
-/// preceding section's size and this follows.
+/// page-table self-pointers (`bootmem`) embed this at const-eval time. Tatu
+/// keeps those pointers consistent with its linked layout; arma uses the ELF
+/// section GPA. Change any preceding section's size and this follows.
 #[cfg(target_arch = "x86_64")]
 pub(crate) const PGT_BASE: u64 = (size_of_val(&GUARD)
     + size_of_val(&STACK)

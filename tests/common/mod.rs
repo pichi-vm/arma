@@ -56,7 +56,12 @@ pub(crate) fn build_pmi(
     config: &Path,
     out: &Path,
 ) {
-    build_pmi_with_profile(kernel, initrd, cmdline, "x86-64-v3", config, out);
+    let profile = if cfg!(target_arch = "aarch64") {
+        "armv8.0-a"
+    } else {
+        "x86-64-v3"
+    };
+    build_pmi_with_profile(kernel, initrd, cmdline, profile, config, out);
 }
 
 pub(crate) fn build_pmi_with_profile(

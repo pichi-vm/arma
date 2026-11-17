@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ciborium::value::Value;
 use devtree::{NodeView, Tree, TreeView};
 
@@ -31,33 +31,134 @@ struct Region {
     kind: Kind,
 }
 
+// Layout inspection uses only these fields; other launch attributes, including
+// legacy CPU state, deliberately remain outside this checker's contract.
+struct Manifest {
+    actions: Vec<Action>,
+    dt_dtb: Option<String>,
+}
+
+// Load/fill kinds select boot-time content, not the destination's extent.
+struct Action {
+    section: String,
+    gpa: u64,
+}
+
+impl Manifest {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        let value: Value = ciborium::from_reader(bytes).context("decode .pmi.vm CBOR")?;
+        let Value::Map(fields) = value else {
+            bail!(".pmi.vm must be a map");
+        };
+        let mut actions = None;
+        let mut dt_dtb = None;
+        for (key, value) in fields {
+            match key.as_text() {
+                Some("actions") => {
+                    ensure!(actions.is_none(), "duplicate actions field");
+                    let Value::Array(values) = value else {
+                        bail!("actions must be an array");
+                    };
+                    actions = Some(
+                        values
+                            .into_iter()
+                            .map(Action::parse)
+                            .collect::<Result<_>>()?,
+                    );
+                }
+                Some("dt:dtb") => {
+                    ensure!(dt_dtb.is_none(), "duplicate dt:dtb field");
+                    let Value::Text(name) = value else {
+                        bail!("dt:dtb must be a text string");
+                    };
+                    dt_dtb = Some(name);
+                }
+                _ => {}
+            }
+        }
+        Ok(Self {
+            actions: actions.context("missing actions field")?,
+            dt_dtb,
+        })
+    }
+}
+
+impl Action {
+    fn parse(value: Value) -> Result<Self> {
+        let Value::Map(fields) = value else {
+            bail!("action must be a map");
+        };
+        let mut kind = None;
+        let mut section = None;
+        let mut gpa = None;
+        for (key, value) in fields {
+            match key.as_text() {
+                Some("type") => {
+                    ensure!(kind.is_none(), "duplicate action type field");
+                    let Value::Text(name) = value else {
+                        bail!("action type must be a text string");
+                    };
+                    kind = Some(name);
+                }
+                Some("section") => {
+                    ensure!(section.is_none(), "duplicate action section field");
+                    let Value::Text(name) = value else {
+                        bail!("action section must be a text string");
+                    };
+                    section = Some(name);
+                }
+                Some("gpa") => {
+                    ensure!(gpa.is_none(), "duplicate action gpa field");
+                    let Value::Integer(integer) = value else {
+                        bail!("action gpa must be an unsigned 64-bit integer");
+                    };
+                    gpa = Some(u64::try_from(integer).context("action gpa is outside u64 range")?);
+                }
+                _ => {}
+            }
+        }
+        let section = section.context("missing action section field")?;
+        let gpa = gpa.context("missing action gpa field")?;
+        match kind.context("missing action type field")?.as_str() {
+            "load" | "fill" => Ok(Self { section, gpa }),
+            other => bail!("unknown action type {other:?}"),
+        }
+    }
+}
+
 pub(crate) fn run(pmi_path: &Path) -> Result<()> {
     let bytes =
         std::fs::read(pmi_path).with_context(|| format!("read PMI: {}", pmi_path.display()))?;
     let pe = goblin::pe::PE::parse(&bytes).context("parse PMI as PE")?;
 
+    let cbor =
+        section_raw(&bytes, &pe, ".pmi.vm").context(".pmi.vm section absent from the PMI")?;
+    let manifest = Manifest::parse(cbor)?;
+
     let mut regions: Vec<Region> = Vec::new();
-    for s in &pe.sections {
-        let name = s.name().unwrap_or("?").trim_end_matches('\0').to_string();
-        // Loaded payload sections carry a nonzero GPA (virtual_address); the
-        // non-loaded `.pmi.vm` manifest and the bundled-fallback base sit at 0
-        // and are excluded.
-        let gpa = u64::from(s.virtual_address);
-        if gpa > 0 {
-            regions.push(Region {
-                name,
-                base: gpa,
-                size: u64::from(s.virtual_size),
-                kind: Kind::Payload,
-            });
-        }
+    for action in manifest.actions {
+        let Action { section: name, gpa } = action;
+        let section = pe
+            .sections
+            .iter()
+            .find(|s| s.name().unwrap_or("").trim_end_matches('\0') == name)
+            .with_context(|| format!("action names section `{name}`, absent from the PMI"))?;
+        let size = u64::from(section.virtual_size);
+        gpa.checked_add(size)
+            .with_context(|| format!("action range for `{name}` overflows"))?;
+        regions.push(Region {
+            name,
+            base: gpa,
+            size,
+            kind: Kind::Payload,
+        });
     }
 
     // Locate the bundled base DTB through the `dt:dtb` attribute in `.pmi.vm`
     // (`.tatu.dtb` in attached mode, `.dtb` in optional). A detached image
     // carries no attribute and no bundled base, so its device regions cannot be
     // shown here.
-    match base_dtb_bytes(&bytes, &pe)? {
+    match base_dtb_bytes(&bytes, &pe, manifest.dt_dtb.as_deref())? {
         Some(dtb) => regions.extend(base_device_regions(dtb)?),
         None => println!("(base DTB is detached; device regions omitted)"),
     }
@@ -262,29 +363,17 @@ fn base_device_regions(dtb: &[u8]) -> Result<Vec<Region>> {
 
 /// The bundled base DTB named by the `.pmi.vm` `dt:dtb` attribute, or `None` for
 /// a detached image (no attribute, no bundled base).
-fn base_dtb_bytes<'b>(bytes: &'b [u8], pe: &goblin::pe::PE<'_>) -> Result<Option<&'b [u8]>> {
-    let Some(section) = dt_dtb_attribute(bytes, pe)? else {
+fn base_dtb_bytes<'b>(
+    bytes: &'b [u8],
+    pe: &goblin::pe::PE<'_>,
+    section: Option<&str>,
+) -> Result<Option<&'b [u8]>> {
+    let Some(section) = section else {
         return Ok(None);
     };
-    let raw = section_raw(bytes, pe, &section)
+    let raw = section_raw(bytes, pe, section)
         .with_context(|| format!("dt:dtb names section `{section}`, absent from the PMI"))?;
     Ok(Some(raw))
-}
-
-/// The `dt:dtb` attribute (a PE section name) from the `.pmi.vm` CBOR manifest.
-fn dt_dtb_attribute(bytes: &[u8], pe: &goblin::pe::PE<'_>) -> Result<Option<String>> {
-    let cbor = section_raw(bytes, pe, ".pmi.vm").context(".pmi.vm section absent from the PMI")?;
-    let value: Value = ciborium::from_reader(cbor).context("decode .pmi.vm CBOR")?;
-    let Value::Map(entries) = value else {
-        bail!(".pmi.vm is not a CBOR map");
-    };
-    for (k, v) in &entries {
-        if matches!(k, Value::Text(t) if t == "dt:dtb") {
-            let name = v.as_text().context("dt:dtb attribute is not text")?;
-            return Ok(Some(name.to_owned()));
-        }
-    }
-    Ok(None)
 }
 
 /// Raw file bytes of the named PE section.
@@ -317,5 +406,190 @@ fn human(n: u64) -> String {
         format!("{} KiB", n / 1024)
     } else {
         format!("{n} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use pmi::vm::{Action as PmiAction, Fill, FillKind, Load, LoadKind, Spec};
+
+    use super::*;
+    use crate::pe::{Section, build_pe};
+
+    #[test]
+    fn zero_gpa_actions_participate_in_layout_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.pmi");
+        for (machine, profile, legacy) in [
+            (0x8664, "x86-64-v2", false),
+            (0xaa64, "armv8.0-a", false),
+            (0x8664, "x86-64-v2", true),
+            (0xaa64, "armv8.0-a", true),
+        ] {
+            for (reset_gpa, fill_gpa, overlaps) in
+                [(0, 0x1000, false), (0, 0x800, true), (0x800, 0, true)]
+            {
+                let spec = Spec {
+                    version: pmi::Version::default(),
+                    cpu_profile: profile,
+                    dt_dtb: None,
+                    actions: vec![
+                        PmiAction::Load(Load {
+                            gpa: reset_gpa,
+                            section: ".reset".into(),
+                            kind: LoadKind::Default,
+                        }),
+                        PmiAction::Fill(Fill {
+                            gpa: fill_gpa,
+                            section: ".fill".into(),
+                            kind: FillKind::DtDtb,
+                        }),
+                    ],
+                };
+                let mut value = Value::serialized(&spec).unwrap();
+                if legacy {
+                    // Producer 0e9a143 used merged:dtbo; its kind and CPU state
+                    // are irrelevant to the destination's layout.
+                    let actions = value
+                        .as_map_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|(key, _)| key.as_text() == Some("actions"))
+                        .unwrap()
+                        .1
+                        .as_array_mut()
+                        .unwrap();
+                    let kind = actions[1]
+                        .as_map_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|(key, _)| key.as_text() == Some("kind"))
+                        .unwrap();
+                    kind.1 = Value::Text("merged:dtbo".into());
+                    value.as_map_mut().unwrap().push((
+                        Value::Text("vm:vcpu".into()),
+                        Value::Map(vec![(Value::Text("pc".into()), Value::from(0))]),
+                    ));
+                }
+                let mut manifest = Vec::new();
+                ciborium::into_writer(&value, &mut manifest).unwrap();
+                let sections = [
+                    Section {
+                        name: ".reset".into(),
+                        vaddr: 0,
+                        virtual_size: 0x1000,
+                        data: Cow::Borrowed(&[0]),
+                        characteristics: 0,
+                        non_loaded: false,
+                    },
+                    Section {
+                        name: ".fill".into(),
+                        // The action, not the PE address, selects the destination.
+                        vaddr: 0x4000,
+                        virtual_size: 0x1000,
+                        data: Cow::Borrowed(&[]),
+                        characteristics: 0,
+                        non_loaded: false,
+                    },
+                    Section {
+                        name: ".unused".into(),
+                        vaddr: 0,
+                        virtual_size: 0x1000,
+                        data: Cow::Borrowed(&[0]),
+                        characteristics: 0,
+                        non_loaded: true,
+                    },
+                    Section {
+                        name: ".pmi.vm".into(),
+                        vaddr: 0,
+                        virtual_size: manifest.len() as u64,
+                        data: Cow::Owned(manifest),
+                        characteristics: 0,
+                        non_loaded: true,
+                    },
+                ];
+                std::fs::write(&path, build_pe(machine, &sections).unwrap()).unwrap();
+                let result = run(&path);
+                if overlaps {
+                    assert_eq!(result.unwrap_err().to_string(), "1 layout problem(s) found");
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn present_dtb_attribute_requires_text() {
+        // Two-entry map: actions = [], dt:dtb = the appended CBOR value.
+        let prefix = b"\xa2\x67actions\x80\x66dt:dtb";
+        let mut text = prefix.to_vec();
+        text.extend_from_slice(b"\x64.dtb");
+        let manifest = Manifest::parse(&text).unwrap();
+        assert_eq!(manifest.dt_dtb.as_deref(), Some(".dtb"));
+
+        // CBOR null, undefined, and a URI-tagged string are not text values.
+        for non_text in [b"\xf6".as_slice(), b"\xf7", b"\xd8\x20\x64.dtb"] {
+            let mut bytes = prefix.to_vec();
+            bytes.extend_from_slice(non_text);
+            assert!(Manifest::parse(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn actions_require_an_actual_array() {
+        let prefix = b"\xa1\x67actions";
+        for container in [
+            b"\x40".as_slice(), // Empty byte string.
+            b"\x5f\xff",        // Indefinite empty byte string.
+            b"\xa0",            // Empty map.
+            b"\xd8\x20\x80",    // Tagged array.
+        ] {
+            let mut bytes = prefix.to_vec();
+            bytes.extend_from_slice(container);
+            assert!(Manifest::parse(&bytes).is_err());
+        }
+        let manifest = Manifest::parse(b"\xa1\x67actions\x80").unwrap();
+        assert!(manifest.actions.is_empty());
+        assert!(manifest.dt_dtb.is_none());
+    }
+
+    #[test]
+    fn indefinite_text_keys_and_values_describe_the_same_layout() {
+        // Indefinite maps/array with chunked text for every consumed key and
+        // text value: actions = [{type: load, section: .reset, gpa: 0}], dt:dtb = .dtb.
+        let bytes = b"\xbf\x7f\x63act\x64ions\xff\x9f\xbf\x7f\x62ty\x62pe\xff\x7f\x62lo\x62ad\xff\x7f\x63sec\x64tion\xff\x7f\x62.r\x64eset\xff\x7f\x61g\x62pa\xff\x00\xff\xff\x7f\x63dt:\x63dtb\xff\x7f\x62.d\x62tb\xff\xff";
+        let manifest = Manifest::parse(bytes).unwrap();
+        assert_eq!(manifest.dt_dtb.as_deref(), Some(".dtb"));
+        assert!(
+            matches!(manifest.actions.as_slice(), [Action { section, gpa: 0 }] if section == ".reset")
+        );
+    }
+
+    #[test]
+    fn duplicate_layout_fields_are_rejected() {
+        for bytes in [
+            b"\xa2\x67actions\x80\x67actions\x80".as_slice(),
+            b"\xa3\x67actions\x80\x66dt:dtb\x64.dtb\x66dt:dtb\x64.dtb",
+        ] {
+            assert!(Manifest::parse(bytes).is_err());
+        }
+        let action: Value = ciborium::from_reader(
+            b"\xa3\x64type\x64load\x67section\x66.reset\x63gpa\x00".as_slice(),
+        )
+        .unwrap();
+        for field in ["type", "section", "gpa"] {
+            let mut duplicate = action.clone();
+            let fields = duplicate.as_map_mut().unwrap();
+            let existing = fields
+                .iter()
+                .find(|(key, _)| key.as_text() == Some(field))
+                .unwrap()
+                .clone();
+            fields.push(existing);
+            assert!(Action::parse(duplicate).is_err());
+        }
     }
 }

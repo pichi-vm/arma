@@ -3,9 +3,11 @@
 
 //! x86_64 boot CPU tables, baked into the tatu binary at build time.
 //!
-//! The boot vCPU enters long mode, so dillo must load `cr3` and `gdtr`
-//! *before* tatu's first instruction. Those structures therefore can't
-//! be built at runtime — they ship as two fixed sections:
+//! The boot vCPU starts in 32-bit protected mode with paging off (the fixed
+//! PMI `vm` boot state) and tatu's reset trampoline switches to long mode
+//! itself. The structures it loads (`gdtr`, `cr3`) are baked into the binary
+//! rather than built at runtime, so the trampoline needs no stack and no
+//! writable memory — they ship as two fixed sections:
 //!
 //! - `.tatu.pgt`: 4-level identity map of the first 4 GiB using 2 MiB
 //!   pages (PML4 + PDPT + 4× PD = 6 pages = 24 KiB).
@@ -20,8 +22,8 @@
 //! the base is [`crate::sections::PGT_BASE`] — itself derived at const-eval
 //! time as the prefix sum of the sections that precede `.tatu.pgt`, which
 //! is exactly where the linker packs it. arma never reads this constant:
-//! it discovers the section's GPA from tatu's ELF section table and
-//! cross-checks it.
+//! it trusts the section's GPA from tatu's ELF section table. Tatu owns
+//! this layout and its agreement with the page-table pointers.
 
 // `link_section` overrides trip the unsafe-code lint; this whole module
 // is the documented x86 placement contract (linker/x86_64.ld), not a
@@ -37,6 +39,10 @@ use crate::workspace::PageCell;
 pub(crate) const PGT_SIZE: usize = 6 * 4096;
 /// One page. `pub` for the same reason as [`PGT_SIZE`].
 pub(crate) const GDT_SIZE: usize = 4096;
+/// `GDTR.limit` the trampoline loads: 3 entries × 8 bytes − 1.
+pub(crate) const GDT_LIMIT: u16 = 3 * 8 - 1;
+/// Selector of the 64-bit code descriptor in [`GDT`].
+pub(crate) const CODE64_SELECTOR: u16 = 0x08;
 
 /// Page-table entry flags.
 const PAGE_PRESENT: u64 = 1 << 0;
@@ -130,15 +136,14 @@ const fn gdt_page() -> [u8; GDT_SIZE] {
 /// `.tatu.pgt` — the identity-map page tables. `PageCell` because the
 /// CPU's page walker may set Accessed/Dirty bits while tatu runs under
 /// these tables (a write tatu's Rust code never performs). Fixed at
-/// [`PGT_BASE`] by the linker. Referenced only by the CPU via `cr3`;
-/// `#[used]` keeps it in the binary.
+/// [`PGT_BASE`] by the linker. Referenced by the reset trampoline's `cr3`
+/// load (via `sym`); `#[used]` keeps it in the binary.
 #[used]
-#[allow(dead_code)]
 #[unsafe(link_section = ".tatu.pgt")]
-static PGTABLE: PageCell<Paged<[u8; PGT_SIZE]>> = PageCell::new(Paged(identity_map_4gib()));
+pub(crate) static PGTABLE: PageCell<Paged<[u8; PGT_SIZE]>> =
+    PageCell::new(Paged(identity_map_4gib()));
 
-/// `.tatu.gdt` — the boot GDT. Referenced only by the CPU via `gdtr`.
+/// `.tatu.gdt` — the boot GDT. Loaded by the reset trampoline's `lgdt`.
 #[used]
-#[allow(dead_code)]
 #[unsafe(link_section = ".tatu.gdt")]
-static GDT: PageCell<Paged<[u8; GDT_SIZE]>> = PageCell::new(Paged(gdt_page()));
+pub(crate) static GDT: PageCell<Paged<[u8; GDT_SIZE]>> = PageCell::new(Paged(gdt_page()));
