@@ -74,7 +74,7 @@ read-only tree for the duration of the build. Standard filesystem checks reject
 existing symlinks and escapes but are not an atomic sandbox against concurrent
 malicious replacement of files or directories.
 
-Keep the existing `/init`, `/dev`, and `/dev/console` archive entries. Add
+Include `/init`, `/dev`, `/dev/console`, and `/dev/null`. Add
 parent directories deterministically, normalize metadata, enforce newc
 field bounds and build the complete archive before guest layout planning.
 Do not ship module index files; Corium recursively loads eligible regular
