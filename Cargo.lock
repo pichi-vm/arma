@@ -81,6 +81,7 @@ dependencies = [
  "burrow",
  "ciborium",
  "clap",
+ "cpio",
  "devtree",
  "flate2",
  "goblin",
@@ -307,6 +308,12 @@ name = "core_detect"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
+name = "cpio"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd609f59ec3371b104ae6b123ff63e89736dc50bae0bb6650295993487197f48"
 
 [[package]]
 name = "cpufeatures"

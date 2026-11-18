@@ -25,7 +25,7 @@
 //!   - "static" means the ELF has no `PT_INTERP` program header.
 
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{Read, Write};
 
 use goblin::elf::Elf;
 use goblin::elf::program_header::PT_INTERP;
@@ -63,6 +63,9 @@ pub(crate) enum InitrdError {
 
     #[error("initramfs entry exceeds newc field limits or addressable archive size")]
     ArchiveTooLarge,
+
+    #[error("initramfs archive write failed: {0}")]
+    ArchiveWrite(std::io::Error),
 
     #[error("malformed or truncated cpio newc initramfs")]
     MalformedArchive,
@@ -171,7 +174,7 @@ pub(crate) fn materialize(input: &[u8]) -> Result<Cow<'_, [u8]>, InitrdError> {
         if input.len() > u32::MAX as usize {
             return Err(InitrdError::InitTooLarge(input.len()));
         }
-        return Ok(Cow::Owned(wrap_as_cpio(input)));
+        return Ok(Cow::Owned(wrap_as_cpio(input)?));
     }
     Err(InitrdError::UnsupportedFormat)
 }
@@ -314,7 +317,16 @@ fn checked_entry(
     let additional = checked_entry_size(out.len(), name.len(), bytes.len())?;
     out.try_reserve(additional)
         .map_err(|_| InitrdError::ArchiveTooLarge)?;
-    cpio_entry(out, ino, mode, nlink, name, bytes, rdev);
+    let (major, minor) = rdev.unwrap_or((0, 0));
+    let mut entry = cpio::newc::Builder::new(name)
+        .ino(ino)
+        .mode(mode)
+        .nlink(nlink)
+        .rdev_major(major)
+        .rdev_minor(minor)
+        .write(out, bytes.len() as u32);
+    entry.write_all(bytes).map_err(InitrdError::ArchiveWrite)?;
+    entry.finish().map_err(InitrdError::ArchiveWrite)?;
     Ok(())
 }
 
@@ -377,56 +389,6 @@ fn skip_padding(bytes: &[u8]) -> &[u8] {
     &bytes[bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len())..]
 }
 
-/// Emit a cpio newc entry with the given inode, mode, link count,
-/// name, and data. Optionally a `(major, minor)` for character/block
-/// device nodes.
-fn cpio_entry(
-    out: &mut Vec<u8>,
-    ino: u32,
-    mode: u32,
-    nlink: u32,
-    name: &str,
-    data: &[u8],
-    rdev: Option<(u32, u32)>,
-) {
-    let namesize = name.len() + 1; // includes NUL terminator
-    let (rdevmajor, rdevminor) = rdev.unwrap_or((0, 0));
-    let header = format!(
-        "070701\
-         {ino:08X}\
-         {mode:08X}\
-         {uid:08X}\
-         {gid:08X}\
-         {nlink:08X}\
-         {mtime:08X}\
-         {filesize:08X}\
-         {devmajor:08X}\
-         {devminor:08X}\
-         {rdevmajor:08X}\
-         {rdevminor:08X}\
-         {namesize:08X}\
-         {check:08X}",
-        uid = 0,
-        gid = 0,
-        mtime = 0,
-        filesize = data.len(),
-        devmajor = 0,
-        devminor = 0,
-        check = 0,
-    );
-
-    out.extend_from_slice(header.as_bytes());
-    out.extend_from_slice(name.as_bytes());
-    out.push(0); // NUL
-    while !out.len().is_multiple_of(4) {
-        out.push(0);
-    }
-    out.extend_from_slice(data);
-    while !out.len().is_multiple_of(4) {
-        out.push(0);
-    }
-}
-
 /// Wrap a single executable in a minimal cpio newc archive.
 ///
 /// Layout:
@@ -435,11 +397,11 @@ fn cpio_entry(
 ///   /dev/console         (char device, major 5 minor 1, rw-rw-rw-)
 ///   /init                (executable, 0755, the input bytes)
 ///   TRAILER!!!           (sentinel)
-fn wrap_as_cpio(init_binary: &[u8]) -> Vec<u8> {
+fn wrap_as_cpio(init_binary: &[u8]) -> Result<Vec<u8>, InitrdError> {
     let mut out = Vec::with_capacity(512 + init_binary.len());
-    cpio_entry(&mut out, 1, 0o040_755, 3, ".", &[], None);
-    cpio_entry(&mut out, 2, 0o040_755, 2, "dev", &[], None);
-    cpio_entry(
+    checked_entry(&mut out, 1, 0o040_755, 3, ".", &[], None)?;
+    checked_entry(&mut out, 2, 0o040_755, 2, "dev", &[], None)?;
+    checked_entry(
         &mut out,
         3,
         0o020_666, // char device, rw-rw-rw-
@@ -447,10 +409,10 @@ fn wrap_as_cpio(init_binary: &[u8]) -> Vec<u8> {
         "dev/console",
         &[],
         Some((5, 1)),
-    );
-    cpio_entry(&mut out, 4, 0o100_755, 1, "init", init_binary, None);
-    cpio_entry(&mut out, 0, 0, 1, "TRAILER!!!", &[], None);
-    out
+    )?;
+    checked_entry(&mut out, 4, 0o100_755, 1, "init", init_binary, None)?;
+    checked_entry(&mut out, 0, 0, 1, "TRAILER!!!", &[], None)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -787,9 +749,9 @@ mod tests {
         use std::io::Write;
         for suffix in ["gz", "xz", "zst", "bz2", "gz.ko.", "gz/", "gz/.", ""] {
             let name = format!("extra/bad.ko.{suffix}");
-            let mut plain = wrap_as_cpio(b"init");
-            cpio_entry(&mut plain, 5, 0o100_644, 1, &name, b"module", None);
-            cpio_entry(&mut plain, 0, 0, 1, "TRAILER!!!", b"", None);
+            let mut plain = wrap_as_cpio(b"init").unwrap();
+            checked_entry(&mut plain, 5, 0o100_644, 1, &name, b"module", None).unwrap();
+            checked_entry(&mut plain, 0, 0, 1, "TRAILER!!!", b"", None).unwrap();
             let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
             gzip.write_all(&plain).unwrap();
             let zstd = ruzstd::encoding::compress_to_vec(
@@ -808,8 +770,8 @@ mod tests {
         }
         for name in ["extra/good.ko", "extra/good.gz", "extra/good.ko.gz/plain"] {
             let mut plain = Vec::new();
-            cpio_entry(&mut plain, 1, 0o100_644, 1, name, b"module", None);
-            cpio_entry(&mut plain, 0, 0, 1, "TRAILER!!!", b"", None);
+            checked_entry(&mut plain, 1, 0o100_644, 1, name, b"module", None).unwrap();
+            checked_entry(&mut plain, 0, 0, 1, "TRAILER!!!", b"", None).unwrap();
             assert_eq!(materialize(&plain).unwrap().as_ref(), plain);
         }
     }
@@ -873,7 +835,7 @@ mod tests {
         let mut bad_name = archive.to_vec();
         bad_name[114] = b'!';
         assert!(materialize(&bad_name).is_err());
-        let wrapped = wrap_as_cpio(b"test executable");
+        let wrapped = wrap_as_cpio(b"test executable").unwrap();
         assert!(validate_cpio(&wrapped).is_ok());
     }
 
