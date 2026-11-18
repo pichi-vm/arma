@@ -27,10 +27,9 @@ mod reset {
     #[unsafe(link_section = ".tatu.bootinfo")]
     static BOOTINFO: TatuBootInfo = TatuBootInfo::ZERO;
 
-    /// Entry stub in `.tatu.reset.aarch64`, which the single
-    /// `linker/tatu.ld` positions first inside `.tatu.text` so the
-    /// `reset` symbol is the kernel-visible entry. (The x86 stub uses a
-    /// distinct `.tatu.reset.x86_64` routed to the reset vector instead.)
+    /// Reset stub in `.tatu.reset.aarch64`, which `linker/tatu.ld` places
+    /// at GPA 0, the fixed PMI boot address. The x86 stub uses
+    /// `.tatu.reset.x86_64` instead.
     ///
     /// SAFETY: PC-relative adrp/add+:lo12: resolves STACK and
     /// BOOTINFO at link time; adding STACK_SIZE yields the top of
