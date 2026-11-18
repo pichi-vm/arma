@@ -98,11 +98,9 @@ fn write_one_device<N: NodeView + Copy>(
     aml::write_end_tag(slot, pos)
 }
 
-/// `VMnn` NameSeg (two decimal digits); 16 mmio slots is the planner maximum.
+/// `VMnn` NameSeg for a slot index below 100.
 //
-// `index` is bounded to two decimal digits by the planner's 16-slot cap, so
-// the `/10` and `%10` digit split and the `b'0' +` offsets are provably in
-// range — the integer division is the intended decimal extraction.
+// Arma's generated x86 platform uses one pin of its 24-pin IOAPIC per slot.
 #[allow(clippy::arithmetic_side_effects, clippy::integer_division)]
 fn name_seg(index: u8) -> [u8; 4] {
     [b'V', b'M', b'0' + (index / 10), b'0' + (index % 10)]
