@@ -110,8 +110,8 @@ struct BuildArgs {
     cmdline: String,
 
     /// vCPU ISA baseline written to `cpu:profile` (the VMM validates it
-    /// against the host). Optional: defaults to the RHEL 9 baseline so a stock
-    /// RHEL guest runs — `armv8.0-a` (aarch64) / `x86-64-v2` (x86-64).
+    /// against the host). If omitted, no attribute is written; the VMM uses
+    /// PMI's architecture default: `armv8.0-a` or `x86-64-v1`.
     #[arg(long)]
     profile: Option<String>,
 

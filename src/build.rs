@@ -43,7 +43,7 @@ pub(crate) struct BuildArgs {
     pub(crate) module_names: Vec<String>,
     pub(crate) module_tree: Option<PathBuf>,
     pub(crate) cmdline: String,
-    /// vCPU ISA baseline; `None` ⇒ the per-arch RHEL 9 default (C2).
+    /// Optional vCPU ISA baseline written to the PMI without adjustment.
     pub(crate) profile: Option<String>,
     pub(crate) serial: bool,
     pub(crate) output_path: PathBuf,
@@ -331,11 +331,6 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     let bootinfo_section_bytes = bi.to_section_bytes();
 
     // ---- Step 10: CBOR manifest ----
-    let baseline = match arch {
-        kernel::Arch::Aarch64 => "armv8.0-a",
-        kernel::Arch::X86_64 => "x86-64-v2",
-    };
-    let cpu_profile = args.profile.as_deref().unwrap_or(baseline);
     // Explicit action GPAs (pmi spec f6be1eb): the planner's placement for the
     // kernel/initrd/relocs; tatu sections and the dtbo fill carry their ELF
     // vaddr (resolved inside build_actions).
@@ -345,8 +340,13 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         bootconfig: lay.bootconfig.as_ref().map(|r| r.start),
         relocs: lay.relocs.as_ref().map(|r| r.start),
     };
-    let cbor = manifest::build_pmi_vm(arch, &tatu_img, action_gpas, cpu_profile, args.dtb_mode)
-        .context("build CBOR manifest")?;
+    let cbor = manifest::build_pmi_vm(
+        &tatu_img,
+        action_gpas,
+        args.profile.as_deref(),
+        args.dtb_mode,
+    )
+    .context("build CBOR manifest")?;
 
     // Detached mode: the base DTB is delivered out-of-band, so write the
     // generated base to the caller's path instead of bundling it in the PMI.

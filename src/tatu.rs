@@ -5,8 +5,8 @@
 //! PE-section image per `SHF_ALLOC` ELF section.
 //!
 //! Tatu's binary is opaque to arma — arma reads only the section
-//! table (for placement) and the ELF header's `e_entry` (for the
-//! boot vCPU's entry point). Tatu's symbol table is not consulted.
+//! table for placement. Tatu owns its fixed boot entry and CPU setup;
+//! arma does not consult its ELF entry or symbol table.
 
 use core::ops::Range;
 
@@ -40,7 +40,7 @@ pub(crate) struct TatuSection {
     pub(crate) is_dtb: bool,
 }
 
-/// Parsed tatu ELF: the SHF_ALLOC sections to emit and the entry GPA.
+/// Parsed tatu ELF: the SHF_ALLOC sections to emit.
 ///
 /// tatu loads at its linked addresses (it is the immovable part of the
 /// guest-physical map); [`TatuImage::reserved`] yields its section ranges
@@ -48,7 +48,6 @@ pub(crate) struct TatuSection {
 #[derive(Debug)]
 pub(crate) struct TatuImage {
     pub(crate) sections: Vec<TatuSection>,
-    pub(crate) entry: u64,
 }
 
 impl TatuImage {
@@ -160,10 +159,7 @@ pub(crate) fn parse(bytes: &[u8], arch: Arch) -> Result<TatuImage, TatuError> {
     // Sort by vaddr so downstream walks sections in GPA order.
     sections.sort_by_key(|s| s.vaddr);
 
-    Ok(TatuImage {
-        sections,
-        entry: elf.header.e_entry,
-    })
+    Ok(TatuImage { sections })
 }
 
 #[cfg(test)]
@@ -176,7 +172,7 @@ mod tests {
         use crate::TATU_X86_64;
         let img = parse(TATU_X86_64, Arch::X86_64).unwrap();
         // Entry MUST be 0xFFFFFFF0 per tatu/x86_64.ld ENTRY(reset).
-        assert_eq!(img.entry, 0xFFFF_FFF0);
+        assert_eq!(Elf::parse(TATU_X86_64).unwrap().header.e_entry, 0xffff_fff0);
         // .tatu.bootinfo MUST be present and exactly 4 KiB.
         let bi = img
             .sections
@@ -202,7 +198,7 @@ mod tests {
     fn parses_aarch64_tatu_elf() {
         use crate::TATU_AARCH64;
         let img = parse(TATU_AARCH64, Arch::Aarch64).unwrap();
-        assert_eq!(img.entry, 0);
+        assert_eq!(Elf::parse(TATU_AARCH64).unwrap().header.e_entry, 0);
         let entry = img.section(".tatu.reset.aarch64").expect("entry section");
         assert_eq!(entry.vaddr, 0);
         assert!(!entry.is_nobits);

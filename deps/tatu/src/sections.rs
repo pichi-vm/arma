@@ -16,8 +16,8 @@
 //! `.tatu.pgt`). Change a section's type and the layout reflows; the
 //! compile-time `assert!`s pin the x86 architectural boundaries (640 KiB,
 //! 1 MiB) so a size change that would push ACPI out of the reserved zone
-//! fails the build. Addresses are never hardcoded (ARCHITECTURE.md §6.3):
-//! arma reads each section's GPA from tatu's ELF and cross-checks.
+//! fails the build. Tatu owns this layout; arma packages each section at
+//! the GPA declared in tatu's ELF section table.
 
 // `link_section` overrides trip the unsafe-code lint; this whole module is
 // the documented placement contract for `linker/tatu.ld`, not a soundness
@@ -261,9 +261,9 @@ pub(crate) static STACK: PageCell<Paged<[u8; STACK_SIZE]>> = PageCell::new(Paged
 
 /// Load GPA of `.tatu.pgt` — derived, not declared: the prefix sum of the
 /// sections that precede it (guard, stack, bootinfo, dtb, dtbo, dtbm). The
-/// page-table self-pointers (`bootmem`) embed this at const-eval time; arma
-/// reads the actual section GPA from the ELF and cross-checks. Change any
-/// preceding section's size and this follows.
+/// page-table self-pointers (`bootmem`) embed this at const-eval time. Tatu
+/// keeps those pointers consistent with its linked layout; arma uses the ELF
+/// section GPA. Change any preceding section's size and this follows.
 #[cfg(target_arch = "x86_64")]
 pub(crate) const PGT_BASE: u64 = (size_of_val(&GUARD)
     + size_of_val(&STACK)

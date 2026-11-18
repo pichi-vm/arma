@@ -24,8 +24,8 @@
  * DTB buffers, the pads, ACPI, bss. PROGBITS = const-baked content that
  * must ship: pgt, gdt, rodata, text, the reset stub.
  *
- * arma reads every section's GPA from this ELF's section table and
- * cross-checks the layout; it never hardcodes an address.
+ * Tatu owns this layout. arma packages each section at the GPA declared
+ * in this ELF's section table.
  */
 
 ENTRY(reset)
