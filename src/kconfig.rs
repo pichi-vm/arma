@@ -204,32 +204,6 @@ impl KernelConfig {
         })
     }
 
-    /// The kernel's ISA build floor (C2 clamp) — the lowest `--profile` the
-    /// kernel can run on. Upstream Kconfig carries no clean x86-64 microarch
-    /// symbol (it's a distro `-march` build flag), and aarch64 ISA features are
-    /// runtime-detected via alternatives, so for stock kernels the floor is the
-    /// architecture baseline; a distro that marks a higher level
-    /// (`CONFIG_X86_64_V{2,3,4}`) raises it. Conservative by design — it never
-    /// reports a floor the kernel doesn't actually require.
-    pub(crate) fn isa_floor(&self, arch: Arch) -> &'static str {
-        match arch {
-            Arch::X86_64 => {
-                if self.is_set("CONFIG_X86_64_V4") {
-                    "x86-64-v4"
-                } else if self.is_set("CONFIG_X86_64_V3") {
-                    "x86-64-v3"
-                } else if self.is_set("CONFIG_X86_64_V2") {
-                    "x86-64-v2"
-                } else {
-                    "x86-64-v1" // the x86-64 baseline
-                }
-            }
-            // aarch64 features (LSE, PAN, MTE, …) are optional/runtime-detected,
-            // not a build-time floor, so stock kernels require only v8.0-a.
-            Arch::Aarch64 => "armv8.0-a",
-        }
-    }
-
     /// The kernel can drive virtio-mmio at all (built-in *or* module). Used to
     /// select default slots and validate explicit `--mmio-slots`.
     fn supports_virtio_mmio(&self) -> bool {
@@ -322,35 +296,6 @@ impl KernelConfig {
                 Ok((mmio, pci))
             }
         }
-    }
-}
-
-/// The ordered ISA levels for an arch (ascending), used to compare profiles.
-fn isa_levels(arch: Arch) -> &'static [&'static str] {
-    match arch {
-        Arch::X86_64 => &["x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"],
-        Arch::Aarch64 => &[
-            "armv8.0-a",
-            "armv8.1-a",
-            "armv8.2-a",
-            "armv8.3-a",
-            "armv8.4-a",
-            "armv8.5-a",
-            "armv8.6-a",
-        ],
-    }
-}
-
-/// C2 clamp: raise `chosen` up to `floor` if the kernel's build floor is higher
-/// — the emitted `cpu:profile` must not sit below what the kernel requires.
-/// An explicit profile arma doesn't recognize is left exactly as set (the
-/// operator may have a vocabulary arma doesn't model).
-pub(crate) fn raise_to_floor(chosen: &str, floor: &str, arch: Arch) -> String {
-    let levels = isa_levels(arch);
-    let rank = |p: &str| levels.iter().position(|&l| l == p);
-    match (rank(chosen), rank(floor)) {
-        (Some(c), Some(f)) if f > c => floor.to_string(),
-        _ => chosen.to_string(),
     }
 }
 
@@ -659,36 +604,5 @@ CONFIG_CMDLINE="\"bootconfig\"""#,
         assert!(c.is_set("CONFIG_VIRTIO_MMIO"));
         // A kernel without the markers yields None (caller errors / asks for --config).
         assert!(KernelConfig::from_ikconfig(b"no ikconfig here").is_none());
-    }
-
-    #[test]
-    fn isa_floor_and_clamp() {
-        // x86: no marker ⇒ baseline v1 floor; the v2 default is not lowered.
-        let c = cfg("CONFIG_PCI=y\n");
-        assert_eq!(c.isa_floor(Arch::X86_64), "x86-64-v1");
-        assert_eq!(
-            raise_to_floor("x86-64-v2", c.isa_floor(Arch::X86_64), Arch::X86_64),
-            "x86-64-v2"
-        );
-        // x86: a v3-marked kernel raises the v2 default to v3 (the clamp).
-        let c3 = cfg("CONFIG_X86_64_V3=y\n");
-        assert_eq!(c3.isa_floor(Arch::X86_64), "x86-64-v3");
-        assert_eq!(
-            raise_to_floor("x86-64-v2", c3.isa_floor(Arch::X86_64), Arch::X86_64),
-            "x86-64-v3"
-        );
-        // An explicit higher profile is kept (operator may require more).
-        assert_eq!(
-            raise_to_floor("x86-64-v4", "x86-64-v2", Arch::X86_64),
-            "x86-64-v4"
-        );
-        // aarch64 stock floor is the baseline; default stays.
-        let a = cfg("CONFIG_ARM64_LSE_ATOMICS=y\n");
-        assert_eq!(a.isa_floor(Arch::Aarch64), "armv8.0-a");
-        // An unrecognized explicit profile is passed through unchanged.
-        assert_eq!(
-            raise_to_floor("vendor-custom", "x86-64-v3", Arch::X86_64),
-            "vendor-custom"
-        );
     }
 }
