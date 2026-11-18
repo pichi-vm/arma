@@ -726,6 +726,26 @@ impl<N: NodeView + Copy> DtbNode<N> {
         Ok((bus_start, bus_end))
     }
 
+    /// Decode an ECAM region using MCFG's bus-zero address origin.
+    pub(crate) fn decode_mcfg(&self) -> Result<(u64, u8, u8), DtbError> {
+        let (base, _) = self
+            .reg(Site::PciHost)?
+            .next()
+            .ok_or(DtbError::MissingProperty {
+                site: Site::PciHost,
+                property: "reg",
+            })?;
+        let (start, end) = self.decode_pci_bus_range()?;
+        // DT reg starts at the first bus; MCFG's origin is always bus zero.
+        let base = base
+            .checked_sub(u64::from(start) << 20)
+            .ok_or(DtbError::ValueOutOfRange {
+                site: Site::PciHost,
+                property: "reg",
+            })?;
+        Ok((base, start, end))
+    }
+
     /// Find the LAPIC node (`compatible = "intel,ce4100-lapic"`) among
     /// this (root) node's children. Used by both count and emit. Its
     /// `reg[0]` base is the MADT local-APIC address.
@@ -873,16 +893,7 @@ impl<N: NodeView + Copy> DtbNode<N> {
             if !child.has_compatible("pci-host-ecam-generic")? {
                 continue;
             }
-            // Validate: reg present + decodable.
-            let _ = child
-                .reg(Site::PciHost)?
-                .next()
-                .ok_or(DtbError::MissingProperty {
-                    site: Site::PciHost,
-                    property: "reg",
-                })?;
-            // Validate: bus-range present, two cells, both fit in u8, start <= end.
-            let _ = child.decode_pci_bus_range()?;
+            let _ = child.decode_mcfg()?;
             ecam_count = ecam_count.checked_add(1).ok_or(DtbError::Internal)?;
         }
         Ok(ecam_count)

@@ -137,6 +137,25 @@ fn pci_missing_bus_range_errors() {
 }
 
 #[test]
+fn mcfg_origin_underflow_fails_before_emission() {
+    let tree: Tree<'_> = Tree::parse(include_bytes!("data/pci_mcfg_underflow.dtb")).unwrap();
+    let mut buf = Box::new(AcpiBuffer::<TEST_BUF>::default());
+    let gpa = common::buf_gpa(&buf);
+    assert!(matches!(
+        buf.populate(&tree, &common::TEST_OEM, gpa),
+        Err(EmitError::Dtb {
+            source: DtbError::ValueOutOfRange {
+                site: Site::PciHost,
+                property: "reg",
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(AsRef::<[u8]>::as_ref(&*buf).iter().all(|byte| *byte == 0));
+}
+
+#[test]
 fn numa_memory_untagged_errors() {
     let err = extract_err(include_bytes!("data/numa_memory_untagged.dtb"));
     assert!(matches!(

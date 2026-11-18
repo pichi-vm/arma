@@ -515,9 +515,14 @@ fn mcfg_lists_two_ecams() {
     let d = common::decode(&*buf);
     assert_eq!(d.mcfg_allocations.len(), 2, "2 ECAM allocations");
     assert_eq!(d.mcfg_allocations[0].0, 0x3000_0000, "first ECAM base");
-    assert_eq!(d.mcfg_allocations[1].0, 0x4000_0000, "second ECAM base");
+    assert_eq!(
+        d.mcfg_allocations[1].0, 0x3800_0000,
+        "second bus-zero origin"
+    );
     assert_eq!(d.mcfg_allocations[0].2, 0x00, "first bus_start");
     assert_eq!(d.mcfg_allocations[0].3, 0x7f, "first bus_end");
     assert_eq!(d.mcfg_allocations[1].2, 0x80, "second bus_start");
     assert_eq!(d.mcfg_allocations[1].3, 0xff, "second bus_end");
+    let (base, _, first, _) = d.mcfg_allocations[1];
+    assert_eq!(base + (u64::from(first) << 20), 0x4000_0000);
 }

@@ -19,7 +19,7 @@ use super::sdt::SdtHeader;
 use super::set_sdt_checksum;
 use super::write_entry;
 use crate::dtb::DtbNode;
-use crate::error::{DtbError, Site};
+use crate::error::DtbError;
 use crate::oem::OemIdentity;
 
 /// MCFG revision per PCI Firmware Spec.
@@ -88,15 +88,7 @@ pub(crate) fn emit<T: TreeView>(
         if !child.has_compatible("pci-host-ecam-generic")? {
             continue;
         }
-        let base = child
-            .reg(Site::PciHost)?
-            .next()
-            .ok_or(DtbError::MissingProperty {
-                site: Site::PciHost,
-                property: "reg",
-            })?
-            .0;
-        let (bus_start, bus_end) = child.decode_pci_bus_range()?;
+        let (base, bus_start, bus_end) = child.decode_mcfg()?;
         // PCIe segment 0. Segments solve 256-bus exhaustion and
         // independent-root-complex topologies in physical hardware;
         // HW-Reduced virtio guests don't approach either limit.
