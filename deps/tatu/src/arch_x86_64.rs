@@ -80,10 +80,9 @@ mod reset {
     static BOOTINFO: TatuBootInfo = TatuBootInfo::ZERO;
 
     /// 16-byte reset trampoline placed at 0xFFFFFFF0 by the linker
-    /// script. Its section is `.tatu.reset.x86_64` (not the shared
-    /// `.tatu.reset`) so the single `linker/tatu.ld` can route the x86
-    /// stub to the architectural reset vector while the aarch64 stub
-    /// folds into `.tatu.text`.
+    /// script. The architecture-specific `.tatu.reset.x86_64` section
+    /// routes this stub to the reset vector; the aarch64 stub folds into
+    /// `.tatu.text`.
     ///
     /// SAFETY: STACK, BOOTINFO, and rust_main all live in the low
     /// 4 GiB of address space (the main image is in the low 1 MiB).
