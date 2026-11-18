@@ -553,25 +553,17 @@ pub(crate) fn apply_kaslr(bootinfo: &TatuBootInfo) {
     }
 }
 
-/// Draw 64 bits of entropy from the guest CPU via `RDRAND`. Retries on the rare
-/// transient failure (CF=0); if the instruction never succeeds the CPU has no
-/// usable RNG, so we halt rather than silently boot without randomization.
+/// Draw 64 bits of guest entropy via `RDRAND`. Halt if it is unavailable or
+/// fails all 100 attempts; never continue with a predictable KASLR seed.
 fn rand_u64() -> u64 {
+    // CPUID.01H:ECX[30] advertises RDRAND. Leaf 1 exists on x86-64.
+    if core::arch::x86_64::__cpuid(1).ecx & (1 << 30) == 0 {
+        halt();
+    }
     for _ in 0..100 {
-        let val: u64;
-        let ok: u8;
-        // SAFETY: RDRAND writes a random value to the destination and sets CF on
-        // success. No memory operands, no stack effect.
-        unsafe {
-            core::arch::asm!(
-                "rdrand {v}",
-                "setc {c}",
-                v = out(reg) val,
-                c = out(reg_byte) ok,
-                options(nomem, nostack),
-            );
-        }
-        if ok != 0 {
+        let mut val = 0;
+        // SAFETY: CPUID above established RDRAND support.
+        if unsafe { core::arch::x86_64::_rdrand64_step(&mut val) } != 0 {
             return val;
         }
     }
