@@ -181,10 +181,10 @@ Conforms to `arm,arch_timer.yaml`.
 timer {
     compatible = "arm,armv8-timer";
     interrupt-parent = <&gic>;
-    interrupts = <1 13 0xff08>,    // secure physical (PPI 13)
-                 <1 14 0xff08>,    // non-secure physical (PPI 14)
-                 <1 11 0xff08>,    // virtual (PPI 11)
-                 <1 10 0xff08>;    // hypervisor (PPI 10)
+    interrupts = <1 13 4>,    // secure physical (PPI 13)
+                 <1 14 4>,    // non-secure physical (PPI 14)
+                 <1 11 4>,    // virtual (PPI 11)
+                 <1 10 4>;    // hypervisor (PPI 10)
     always-on;
 };
 ```

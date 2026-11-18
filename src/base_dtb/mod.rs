@@ -328,6 +328,35 @@ mod tests {
         assert_eq!(magic, 0xd00d_feed);
     }
 
+    #[test]
+    fn aarch64_timer_uses_gicv3_ppis() {
+        use devtree::{NodeView, PropertyView, Tree, TreeView};
+
+        let bytes = build(&arm_inputs()).expect("build");
+        let tree: Tree<'_> = Tree::parse(&bytes).expect("parse aarch64 DTB");
+        let intc = tree
+            .find_path("/interrupt-controller@8000000")
+            .expect("GIC present");
+        assert_eq!(
+            intc.property("compatible").unwrap().as_str(),
+            Some("arm,gic-v3")
+        );
+        assert_eq!(intc.property("#interrupt-cells").unwrap().as_u32(), Some(3));
+
+        let timer = tree.find_path("/timer").expect("timer present");
+        let phandle = intc.property("phandle").unwrap().as_u32().unwrap();
+        assert_eq!(
+            timer.property("interrupt-parent").unwrap().as_u32(),
+            Some(phandle)
+        );
+        assert!(timer.property("always-on").unwrap().as_ref().is_empty());
+        let interrupts = timer.property("interrupts").unwrap();
+        assert_eq!(
+            interrupts.as_u32s().unwrap().collect::<Vec<_>>(),
+            [1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]
+        );
+    }
+
     /// No `ecam` ⇒ no `/pcie` node at all (microVM / virtio-mmio-only).
     #[test]
     fn pci_omitted_without_ecam() {
