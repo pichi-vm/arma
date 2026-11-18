@@ -79,41 +79,37 @@ mod reset {
     #[unsafe(link_section = ".tatu.bootinfo")]
     static BOOTINFO: TatuBootInfo = TatuBootInfo::ZERO;
 
-    /// 16-byte reset trampoline placed at 0xFFFFFFF0 by the linker
-    /// script. The architecture-specific `.tatu.reset.x86_64` section
-    /// routes this stub to the reset vector; the aarch64 stub folds into
-    /// `.tatu.text`.
-    ///
-    /// SAFETY: STACK, BOOTINFO, and rust_main all live in the low
-    /// 4 GiB of address space (the main image is in the low 1 MiB).
-    /// `mov esp/edi, imm32` zero-extends into RSP/RDI
-    /// (a long-mode rule for 32-bit destination registers).
-    /// `push imm32` in long mode sign-extends to 64 bits and
-    /// pushes 8 bytes; the main image's top bit is clear, so
-    /// sign-extension matches zero-extension. `ret` pops 8 bytes
-    /// into RIP, transferring control to rust_main with RSP back
-    /// where `mov esp` left it. System V x86_64 ABI: first arg in
-    /// RDI, so rust_main receives `bootinfo: &TatuBootInfo`. The
-    /// stub is exactly 5 + 5 + 5 + 1 = 16 bytes — no padding nops.
-    /// `#[unsafe(no_mangle)]` is the keep-alive anchor: rustc
-    /// drops unreachable naked fns in `#![no_main]` binaries
-    /// regardless of `pub` visibility, and `#[used]` doesn't
-    /// apply to functions. no_mangle exposes the symbol as an
-    /// external linkage point, which both prevents DCE and
-    /// makes the name available to the linker's `ENTRY()`.
+    // The manifest supplies long mode and the GDT. Jump from the fixed
+    // 16-byte reset vector to the stack setup, then CALL Rust so its entry
+    // stack includes a return address. The previous push/ret tail transfer
+    // entered Rust with RSP % 16 == 0, violating the SysV ABI.
+    // All referenced symbols are below 4 GiB; mov eax zero-extends in long
+    // mode. The .code32 encoding of this absolute jump is valid in both modes.
+    core::arch::global_asm!(
+        ".pushsection .tatu.reset.x86_64, \"ax\", %progbits",
+        ".global reset",
+        "reset:",
+        ".code32",
+        "    mov     eax, offset {entry}",       // 5 bytes
+        "    jmp     eax",                            // 2 bytes
+        "    .fill   9, 1, 0xCC",                     // int3 padding to 16
+        ".code64",
+        ".popsection",
+        entry = sym long_entry,
+    );
+
+    /// Set the stack and call Rust with SysV entry alignment (RSP % 16 == 8).
     #[unsafe(naked)]
-    #[unsafe(no_mangle)]
-    #[unsafe(link_section = ".tatu.reset.x86_64")]
-    extern "C" fn reset() -> ! {
+    unsafe extern "C" fn long_entry() -> ! {
         core::arch::naked_asm!(
-            "mov  esp, offset {stack} + {size}",
-            "mov  edi, offset {bootinfo}",
-            "push offset {main}",
-            "ret",
-            stack    = sym crate::sections::STACK,
-            size     = const STACK_SIZE,
-            bootinfo = sym BOOTINFO,
-            main     = sym crate::rust_main,
+            "    mov     esp, offset {stack} + {stack_size}", // top of STACK
+            "    mov     edi, offset {bootinfo}",            // arg 0: &BOOTINFO
+            "    call    {rust_main}",                      // SysV entry: RSP % 16 == 8
+            "    ud2",                                      // rust_main never returns
+            stack      = sym crate::sections::STACK,
+            stack_size = const STACK_SIZE,
+            bootinfo   = sym BOOTINFO,
+            rust_main  = sym crate::rust_main,
         )
     }
 }
