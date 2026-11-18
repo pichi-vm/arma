@@ -2,7 +2,7 @@
  * tatu/linker/tatu.ld — single, architecture-agnostic linker script.
  *
  * This script only *orders* sections; it assigns no addresses (the lone
- * exception is `.tatu.reset`, see below). Every section is a typed Rust
+ * exception is `.tatu.reset.x86_64`, see below). Every section is a typed Rust
  * static in `src/sections.rs` (or a per-arch module), so its size lives in
  * the type and its GPA falls out of contiguous packing from 0. Which
  * sections exist is decided entirely by `#[cfg]`:
@@ -99,7 +99,7 @@ SECTIONS {
        at the architectural reset vector ~4 GiB from the image. Empty on
        aarch64 (no .tatu.reset.x86_64 input), so it drops and its address
        evaporates without perturbing the layout above. --- */
-    .tatu.reset 0xFFFFF000 : {
+    .tatu.reset.x86_64 0xFFFFF000 : {
         KEEP(*(.tatu.reset.x86_64.pad))   /* 0xFF0 zero pad (x86-only) */
         KEEP(*(.tatu.reset.x86_64))       /* 16-byte stub → 0xFFFFFFF0 */
     } :reset_ph

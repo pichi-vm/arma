@@ -211,8 +211,8 @@ pub(crate) static ROMPAD: PageCell<Paged<[u8; 60 * 1024]>> = PageCell::new(Paged
 
 /// `.tatu.reset.x86_64.pad` — 0xFF0 zero bytes that position the 16-byte
 /// reset stub at the architectural reset vector 0xFFFFFFF0 (the stub
-/// follows this pad in `.tatu.reset`). A static rather than a linker
-/// `. = . + 0xFF0` so the whole `.tatu.reset` section is *genuinely* empty
+/// follows this pad in `.tatu.reset.x86_64`). A static rather than a linker
+/// `. = . + 0xFF0` so the whole `.tatu.reset.x86_64` section is *genuinely* empty
 /// on aarch64 (no nonzero location-counter advance to keep it alive) and
 /// the linker drops it.
 #[cfg(target_arch = "x86_64")]

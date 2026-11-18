@@ -607,12 +607,10 @@ fn tatu_section_characteristics(name: &str, is_nobits: bool) -> u32 {
     //   .tatu.data   — RW data (rare; tatu's release binary minimizes this)
     //   .tatu.bootinfo — RW (arma writes header at build time; tatu reads)
     //   .tatu.bss    — RW zero (BSS)
-    //   .tatu.reset  — code, RX (x86 reset trampoline at 0xFFFF_F000;
-    //                  on aarch64 it's collapsed into .tatu.text by
-    //                  the linker and never appears here)
+    //   .tatu.reset.* — code, RX (architecture-specific reset stub)
     if is_nobits {
         pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA | pe::IMAGE_SCN_MEM_READ | pe::IMAGE_SCN_MEM_WRITE
-    } else if name.contains(".text") || name == ".tatu.reset" {
+    } else if name.contains(".text") || name.starts_with(".tatu.reset.") {
         pe::IMAGE_SCN_CNT_CODE | pe::IMAGE_SCN_MEM_READ | pe::IMAGE_SCN_MEM_EXECUTE
     } else if name.contains(".rodata") {
         pe::IMAGE_SCN_CNT_INITIALIZED_DATA | pe::IMAGE_SCN_MEM_READ

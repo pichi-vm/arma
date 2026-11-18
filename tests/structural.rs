@@ -463,7 +463,7 @@ fn tatu_sections_present_x86() {
         ".tatu.stack",
         ".tatu.rodata",
         ".tatu.text",
-        ".tatu.reset",
+        ".tatu.reset.x86_64",
     ] {
         assert!(names.contains(must), "missing tatu section `{must}`");
     }

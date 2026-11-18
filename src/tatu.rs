@@ -184,12 +184,12 @@ mod tests {
             .find(|s| s.is_bootinfo)
             .expect(".tatu.bootinfo section present");
         assert_eq!(bi.virtual_size, 4096);
-        // .tatu.reset MUST end at 0x100000000.
+        // .tatu.reset.x86_64 MUST end at 0x100000000.
         let rv = img
             .sections
             .iter()
-            .find(|s| s.name == ".tatu.reset")
-            .expect(".tatu.reset section present");
+            .find(|s| s.name == ".tatu.reset.x86_64")
+            .expect(".tatu.reset.x86_64 section present");
         assert_eq!(rv.vaddr + rv.virtual_size, 0x1_0000_0000);
         // Sections sorted by vaddr.
         for w in img.sections.windows(2) {
