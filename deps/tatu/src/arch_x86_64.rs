@@ -79,26 +79,90 @@ mod reset {
     #[unsafe(link_section = ".tatu.bootinfo")]
     static BOOTINFO: TatuBootInfo = TatuBootInfo::ZERO;
 
-    // The manifest supplies long mode and the GDT. Jump from the fixed
-    // 16-byte reset vector to the stack setup, then CALL Rust so its entry
-    // stack includes a return address. The previous push/ret tail transfer
-    // entered Rust with RSP % 16 == 0, violating the SysV ABI.
-    // All referenced symbols are below 4 GiB; mov eax zero-extends in long
-    // mode. The .code32 encoding of this absolute jump is valid in both modes.
+    /// Enable paging (PG).
+    const CR0_ENABLE: u32 = 1 << 31;
+    /// PAE enables long-mode paging.
+    const CR4_ENABLE: u32 = 1 << 5;
+
+    // x86-64 boot path, in three stages: the reset stub ->
+    // [`trampoline`] -> [`long_entry`] -> `rust_main`.
+    //
+    // Entry state (pmi/spec/x86-64.md, "Boot vCPU"): RIP=0xFFFFFFF0, 32-bit
+    // protected mode, paging off, flat 4 GiB segments, CR0=PE|NE, CR4=MCE,
+    // EFER=SCE|LME|NXE, interrupts disabled. No general-purpose register
+    // value may be relied on. EFER.LME is already set. PMI also supplies
+    // initialized x87/SSE state; this soft-float firmware does not use it.
+    //
+    // The reset stub exports `reset`, selected by ENTRY(reset) in the linker
+    // script. Stages 2 and 3 are naked Rust functions so the earlier stage can
+    // name them with `sym`: they get mangled, internal symbols and are never
+    // called from Rust.
+    //
+    // SAFETY: every symbol referenced lies in the low 4 GiB (the image sits
+    // at the 1 MiB floor), so the 32-bit immediates hold full addresses, and
+    // in 64-bit mode `mov esp`/`mov edi` zero-extend.
+
+    // Stage 1: reset vector, 0xFFFFFFF0 (placed by linker/tatu.ld). Exactly
+    // 16 bytes. A direct `jmp rel32` to the trampoline would have to wrap
+    // around 4 GiB, which the linker rejects, so jump through EAX.
     core::arch::global_asm!(
         ".pushsection .tatu.reset.x86_64, \"ax\", %progbits",
         ".global reset",
         "reset:",
         ".code32",
-        "    mov     eax, offset {entry}",       // 5 bytes
+        "    mov     eax, offset {trampoline}",       // 5 bytes
         "    jmp     eax",                            // 2 bytes
         "    .fill   9, 1, 0xCC",                     // int3 padding to 16
         ".code64",
         ".popsection",
-        entry = sym long_entry,
+        trampoline = sym trampoline,
     );
 
-    /// Set the stack and call Rust with SysV entry alignment (RSP % 16 == 8).
+    /// Stage 2: 32-bit protected mode with paging off -> long mode. Its GDTR
+    /// pseudo-descriptor follows the code.
+    #[unsafe(naked)]
+    unsafe extern "C" fn trampoline() -> ! {
+        core::arch::naked_asm!(
+            ".code32",
+            // Load tatu's GDT, which holds the 64-bit code descriptor.
+            "    lgdt    [2f]",
+            "",
+            // Enable PAE. Keep the specified MCE bit intact.
+            "    mov     eax, cr4",
+            "    or      eax, {cr4_enable}",
+            "    mov     cr4, eax",
+            "",
+            // Point CR3 at tatu's identity map of the low 4 GiB.
+            "    mov     eax, offset {pgt}",
+            "    mov     cr3, eax",
+            "",
+            // Enable paging. With EFER.LME already set this activates long
+            // mode, running in compatibility mode until CS is reloaded.
+            "    mov     eax, cr0",
+            "    or      eax, {cr0_enable}",
+            "    mov     cr0, eax",
+            "",
+            // Reload CS with the 64-bit code selector. The data segments
+            // keep their flat descriptors, which 64-bit mode ignores.
+            "    ljmp    {code64}, offset {long_entry}",
+            "",
+            // GDTR pseudo-descriptor for the `lgdt` above.
+            "    .balign 4",
+            "2:",
+            "    .word   {gdt_limit}",                // limit
+            "    .long   {gdt}",                      // base
+            ".code64",
+            cr4_enable = const CR4_ENABLE,
+            pgt        = sym crate::bootmem::PGTABLE,
+            cr0_enable = const CR0_ENABLE,
+            code64     = const crate::bootmem::CODE64_SELECTOR,
+            long_entry = sym long_entry,
+            gdt_limit  = const crate::bootmem::GDT_LIMIT,
+            gdt        = sym crate::bootmem::GDT,
+        )
+    }
+
+    /// Stage 3: 64-bit entry. Set the stack and call into Rust.
     #[unsafe(naked)]
     unsafe extern "C" fn long_entry() -> ! {
         core::arch::naked_asm!(

@@ -16,11 +16,11 @@ use std::fs;
 
 use ciborium::de::from_reader;
 use common::{build_pmi_dtb, dt_dtb_attribute, find_pmi_vm, host_kernel, section_raw_size};
-use pmi::vm::{Action, FillKind, Spec, vcpu};
+use pmi::vm::{Action, FillKind, Spec};
 use tempfile::TempDir;
 
 #[cfg(target_arch = "x86_64")]
-fn spec_of(bytes: &[u8]) -> Spec<vcpu::x86_64::CpuState> {
+fn spec_of(bytes: &[u8]) -> Spec<pmi::x86_64::Profile> {
     let (off, size) = find_pmi_vm(bytes);
     from_reader(&bytes[off..off + size]).expect("decode .pmi.vm")
 }
