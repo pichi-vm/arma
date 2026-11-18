@@ -20,6 +20,10 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
+#![cfg_attr(
+    all(target_os = "none", target_arch = "aarch64"),
+    feature(stdarch_aarch64_rand)
+)]
 // `deny` so the default is unsafe-free; individual items opt in via
 // `#[allow(unsafe_code)]` with a documented `// SAFETY:` block.
 #![deny(unsafe_code)]

@@ -118,40 +118,19 @@ pub(crate) fn prepare_merge_base<'a>(
     Ok(&scratch[..written])
 }
 
-/// 64 bits of guest entropy. Prefers `RNDR` (FEAT_RNG); falls back to the
-/// virtual counter when the CPU lacks it (weak, but avoids trapping on the MRS —
-/// real confidential-computing hosts expose RNDR).
+/// Draw 64 bits of guest entropy via `RNDR`. Halt if it is unavailable or
+/// fails all 100 attempts; never continue with a predictable KASLR seed.
 fn rand_u64() -> u64 {
     if cpu_has_rndr() {
         for _ in 0..100 {
-            let val: u64;
-            let fail: u64;
-            // SAFETY: RNDR is `S3_3_C2_C4_0`; it reads a random value into the
-            // destination and updates NZCV (Z set on failure). FEAT_RNG is
-            // present (checked above), so the MRS does not trap.
-            unsafe {
-                core::arch::asm!(
-                    "mrs {v}, S3_3_C2_C4_0",
-                    "cset {f}, eq",
-                    v = out(reg) val,
-                    f = out(reg) fail,
-                    options(nostack),
-                );
-            }
-            if fail == 0 {
+            let mut val = 0;
+            // SAFETY: FEAT_RNG is present and val is a valid writable u64.
+            if unsafe { core::arch::aarch64::__rndr(&raw mut val) } == 0 {
                 return val;
             }
         }
     }
-    let cnt: u64;
-    // SAFETY: CNTVCT_EL1 is always readable at EL1; no memory or flag effects.
-    unsafe {
-        // CNTVCT_EL1 by raw encoding (S3_3_C14_C0_2) — the bare-target assembler
-        // rejects the symbolic name here.
-        core::arch::asm!("mrs {c}, S3_3_C14_C0_2", c = out(reg) cnt, options(nostack, nomem, preserves_flags));
-    }
-    // Spread the counter's low-entropy bits with a fixed odd multiplier.
-    cnt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    halt()
 }
 
 /// Whether the CPU implements FEAT_RNG (`ID_AA64ISAR0_EL1.RNDR`, bits 63:60).
