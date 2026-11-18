@@ -55,6 +55,7 @@ impl Manifest {
         for (key, value) in fields {
             match key.as_text() {
                 Some("actions") => {
+                    ensure!(actions.is_none(), "duplicate actions field");
                     let Value::Array(values) = value else {
                         bail!("actions must be an array");
                     };
@@ -93,18 +94,21 @@ impl Action {
         for (key, value) in fields {
             match key.as_text() {
                 Some("type") => {
+                    ensure!(kind.is_none(), "duplicate action type field");
                     let Value::Text(name) = value else {
                         bail!("action type must be a text string");
                     };
                     kind = Some(name);
                 }
                 Some("section") => {
+                    ensure!(section.is_none(), "duplicate action section field");
                     let Value::Text(name) = value else {
                         bail!("action section must be a text string");
                     };
                     section = Some(name);
                 }
                 Some("gpa") => {
+                    ensure!(gpa.is_none(), "duplicate action gpa field");
                     let Value::Integer(integer) = value else {
                         bail!("action gpa must be an unsigned 64-bit integer");
                     };
@@ -505,6 +509,61 @@ mod tests {
             let mut bytes = prefix.to_vec();
             bytes.extend_from_slice(non_text);
             assert!(Manifest::parse(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn actions_require_an_actual_array() {
+        let prefix = b"\xa1\x67actions";
+        for container in [
+            b"\x40".as_slice(), // Empty byte string.
+            b"\x5f\xff",        // Indefinite empty byte string.
+            b"\xa0",            // Empty map.
+            b"\xd8\x20\x80",    // Tagged array.
+        ] {
+            let mut bytes = prefix.to_vec();
+            bytes.extend_from_slice(container);
+            assert!(Manifest::parse(&bytes).is_err());
+        }
+        let manifest = Manifest::parse(b"\xa1\x67actions\x80").unwrap();
+        assert!(manifest.actions.is_empty());
+        assert!(manifest.dt_dtb.is_none());
+    }
+
+    #[test]
+    fn indefinite_text_keys_and_values_describe_the_same_layout() {
+        // Indefinite maps/array with chunked text for every consumed key and
+        // text value: actions = [{type: load, section: .reset, gpa: 0}], dt:dtb = .dtb.
+        let bytes = b"\xbf\x7f\x63act\x64ions\xff\x9f\xbf\x7f\x62ty\x62pe\xff\x7f\x62lo\x62ad\xff\x7f\x63sec\x64tion\xff\x7f\x62.r\x64eset\xff\x7f\x61g\x62pa\xff\x00\xff\xff\x7f\x63dt:\x63dtb\xff\x7f\x62.d\x62tb\xff\xff";
+        let manifest = Manifest::parse(bytes).unwrap();
+        assert_eq!(manifest.dt_dtb.as_deref(), Some(".dtb"));
+        assert!(
+            matches!(manifest.actions.as_slice(), [Action { section, gpa: 0 }] if section == ".reset")
+        );
+    }
+
+    #[test]
+    fn duplicate_layout_fields_are_rejected() {
+        for bytes in [
+            b"\xa2\x67actions\x80\x67actions\x80".as_slice(),
+            b"\xa3\x67actions\x80\x66dt:dtb\x64.dtb\x66dt:dtb\x64.dtb",
+        ] {
+            assert!(Manifest::parse(bytes).is_err());
+        }
+        let action: Value = ciborium::from_reader(
+            b"\xa3\x64type\x64load\x67section\x66.reset\x63gpa\x00".as_slice(),
+        )
+        .unwrap();
+        for field in ["type", "section", "gpa"] {
+            let mut duplicate = action.clone();
+            let fields = duplicate.as_map_mut().unwrap();
+            let existing = fields
+                .iter()
+                .find(|(key, _)| key.as_text() == Some(field))
+                .unwrap()
+                .clone();
+            fields.push(existing);
+            assert!(Action::parse(duplicate).is_err());
         }
     }
 }
