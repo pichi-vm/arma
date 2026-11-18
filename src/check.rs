@@ -31,9 +31,17 @@ struct Region {
     kind: Kind,
 }
 
-// Layout inspection ignores launch attributes it does not consume.
+// Layout inspection uses only these fields; other launch attributes, including
+// legacy CPU state, deliberately remain outside this checker's contract.
 struct Manifest {
+    actions: Vec<Action>,
     dt_dtb: Option<String>,
+}
+
+// Load/fill kinds select boot-time content, not the destination's extent.
+struct Action {
+    section: String,
+    gpa: u64,
 }
 
 impl Manifest {
@@ -42,17 +50,75 @@ impl Manifest {
         let Value::Map(fields) = value else {
             bail!(".pmi.vm must be a map");
         };
+        let mut actions = None;
         let mut dt_dtb = None;
         for (key, value) in fields {
-            if key.as_text() == Some("dt:dtb") {
-                ensure!(dt_dtb.is_none(), "duplicate dt:dtb field");
-                let Value::Text(name) = value else {
-                    bail!("dt:dtb must be a text string");
-                };
-                dt_dtb = Some(name);
+            match key.as_text() {
+                Some("actions") => {
+                    let Value::Array(values) = value else {
+                        bail!("actions must be an array");
+                    };
+                    actions = Some(
+                        values
+                            .into_iter()
+                            .map(Action::parse)
+                            .collect::<Result<_>>()?,
+                    );
+                }
+                Some("dt:dtb") => {
+                    ensure!(dt_dtb.is_none(), "duplicate dt:dtb field");
+                    let Value::Text(name) = value else {
+                        bail!("dt:dtb must be a text string");
+                    };
+                    dt_dtb = Some(name);
+                }
+                _ => {}
             }
         }
-        Ok(Self { dt_dtb })
+        Ok(Self {
+            actions: actions.context("missing actions field")?,
+            dt_dtb,
+        })
+    }
+}
+
+impl Action {
+    fn parse(value: Value) -> Result<Self> {
+        let Value::Map(fields) = value else {
+            bail!("action must be a map");
+        };
+        let mut kind = None;
+        let mut section = None;
+        let mut gpa = None;
+        for (key, value) in fields {
+            match key.as_text() {
+                Some("type") => {
+                    let Value::Text(name) = value else {
+                        bail!("action type must be a text string");
+                    };
+                    kind = Some(name);
+                }
+                Some("section") => {
+                    let Value::Text(name) = value else {
+                        bail!("action section must be a text string");
+                    };
+                    section = Some(name);
+                }
+                Some("gpa") => {
+                    let Value::Integer(integer) = value else {
+                        bail!("action gpa must be an unsigned 64-bit integer");
+                    };
+                    gpa = Some(u64::try_from(integer).context("action gpa is outside u64 range")?);
+                }
+                _ => {}
+            }
+        }
+        let section = section.context("missing action section field")?;
+        let gpa = gpa.context("missing action gpa field")?;
+        match kind.context("missing action type field")?.as_str() {
+            "load" | "fill" => Ok(Self { section, gpa }),
+            other => bail!("unknown action type {other:?}"),
+        }
     }
 }
 
@@ -66,20 +132,22 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
     let manifest = Manifest::parse(cbor)?;
 
     let mut regions: Vec<Region> = Vec::new();
-    for s in &pe.sections {
-        let name = s.name().unwrap_or("?").trim_end_matches('\0').to_string();
-        // Loaded payload sections carry a nonzero GPA (virtual_address); the
-        // non-loaded `.pmi.vm` manifest and the bundled-fallback base sit at 0
-        // and are excluded.
-        let gpa = u64::from(s.virtual_address);
-        if gpa > 0 {
-            regions.push(Region {
-                name,
-                base: gpa,
-                size: u64::from(s.virtual_size),
-                kind: Kind::Payload,
-            });
-        }
+    for action in manifest.actions {
+        let Action { section: name, gpa } = action;
+        let section = pe
+            .sections
+            .iter()
+            .find(|s| s.name().unwrap_or("").trim_end_matches('\0') == name)
+            .with_context(|| format!("action names section `{name}`, absent from the PMI"))?;
+        let size = u64::from(section.virtual_size);
+        gpa.checked_add(size)
+            .with_context(|| format!("action range for `{name}` overflows"))?;
+        regions.push(Region {
+            name,
+            base: gpa,
+            size,
+            kind: Kind::Payload,
+        });
     }
 
     // Locate the bundled base DTB through the `dt:dtb` attribute in `.pmi.vm`
@@ -339,7 +407,89 @@ fn human(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
+    use ciborium::cbor;
+
     use super::*;
+    use crate::pe::{Section, build_pe};
+
+    #[test]
+    fn zero_gpa_actions_participate_in_layout_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.pmi");
+        for (machine, profile, legacy) in [
+            (0x8664, "x86-64-v2", false),
+            (0xaa64, "armv8.0-a", false),
+            (0x8664, "x86-64-v2", true),
+            (0xaa64, "armv8.0-a", true),
+        ] {
+            for (reset_gpa, fill_gpa, overlaps) in
+                [(0, 0x1000, false), (0, 0x800, true), (0x800, 0, true)]
+            {
+                let kind = if legacy { "merged:dtbo" } else { "dt:dtb" };
+                let mut value = cbor!({
+                    "version" => 1,
+                    "cpu:profile" => profile,
+                    "actions" => [
+                        {"type" => "load", "gpa" => reset_gpa, "section" => ".reset"},
+                        {"type" => "fill", "gpa" => fill_gpa, "section" => ".fill", "kind" => kind},
+                    ],
+                })
+                .unwrap();
+                if legacy {
+                    value
+                        .as_map_mut()
+                        .unwrap()
+                        .push((Value::Text("vm:vcpu".into()), cbor!({"pc" => 0}).unwrap()));
+                }
+                let mut manifest = Vec::new();
+                ciborium::into_writer(&value, &mut manifest).unwrap();
+                let sections = [
+                    Section {
+                        name: ".reset".into(),
+                        vaddr: 0,
+                        virtual_size: 0x1000,
+                        data: Cow::Borrowed(&[0]),
+                        characteristics: 0,
+                        non_loaded: false,
+                    },
+                    Section {
+                        name: ".fill".into(),
+                        // The action, not the PE address, selects the destination.
+                        vaddr: 0x4000,
+                        virtual_size: 0x1000,
+                        data: Cow::Borrowed(&[]),
+                        characteristics: 0,
+                        non_loaded: false,
+                    },
+                    Section {
+                        name: ".unused".into(),
+                        vaddr: 0,
+                        virtual_size: 0x1000,
+                        data: Cow::Borrowed(&[0]),
+                        characteristics: 0,
+                        non_loaded: true,
+                    },
+                    Section {
+                        name: ".pmi.vm".into(),
+                        vaddr: 0,
+                        virtual_size: manifest.len() as u64,
+                        data: Cow::Owned(manifest),
+                        characteristics: 0,
+                        non_loaded: true,
+                    },
+                ];
+                std::fs::write(&path, build_pe(machine, &sections).unwrap()).unwrap();
+                let result = run(&path);
+                if overlaps {
+                    assert_eq!(result.unwrap_err().to_string(), "1 layout problem(s) found");
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
+    }
 
     #[test]
     fn present_dtb_attribute_requires_text() {
