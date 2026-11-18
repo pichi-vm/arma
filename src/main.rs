@@ -24,6 +24,7 @@ mod kernel;
 mod kernel_cmdline;
 mod kernel_release;
 mod manifest;
+mod mmio_slots;
 mod modules;
 mod pe;
 mod planner;
