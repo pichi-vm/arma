@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ciborium::value::Value;
 use devtree::{NodeView, Tree, TreeView};
 
@@ -31,10 +31,39 @@ struct Region {
     kind: Kind,
 }
 
+// Layout inspection ignores launch attributes it does not consume.
+struct Manifest {
+    dt_dtb: Option<String>,
+}
+
+impl Manifest {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        let value: Value = ciborium::from_reader(bytes).context("decode .pmi.vm CBOR")?;
+        let Value::Map(fields) = value else {
+            bail!(".pmi.vm must be a map");
+        };
+        let mut dt_dtb = None;
+        for (key, value) in fields {
+            if key.as_text() == Some("dt:dtb") {
+                ensure!(dt_dtb.is_none(), "duplicate dt:dtb field");
+                let Value::Text(name) = value else {
+                    bail!("dt:dtb must be a text string");
+                };
+                dt_dtb = Some(name);
+            }
+        }
+        Ok(Self { dt_dtb })
+    }
+}
+
 pub(crate) fn run(pmi_path: &Path) -> Result<()> {
     let bytes =
         std::fs::read(pmi_path).with_context(|| format!("read PMI: {}", pmi_path.display()))?;
     let pe = goblin::pe::PE::parse(&bytes).context("parse PMI as PE")?;
+
+    let cbor =
+        section_raw(&bytes, &pe, ".pmi.vm").context(".pmi.vm section absent from the PMI")?;
+    let manifest = Manifest::parse(cbor)?;
 
     let mut regions: Vec<Region> = Vec::new();
     for s in &pe.sections {
@@ -57,7 +86,7 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
     // (`.tatu.dtb` in attached mode, `.dtb` in optional). A detached image
     // carries no attribute and no bundled base, so its device regions cannot be
     // shown here.
-    match base_dtb_bytes(&bytes, &pe)? {
+    match base_dtb_bytes(&bytes, &pe, manifest.dt_dtb.as_deref())? {
         Some(dtb) => regions.extend(base_device_regions(dtb)?),
         None => println!("(base DTB is detached; device regions omitted)"),
     }
@@ -262,29 +291,17 @@ fn base_device_regions(dtb: &[u8]) -> Result<Vec<Region>> {
 
 /// The bundled base DTB named by the `.pmi.vm` `dt:dtb` attribute, or `None` for
 /// a detached image (no attribute, no bundled base).
-fn base_dtb_bytes<'b>(bytes: &'b [u8], pe: &goblin::pe::PE<'_>) -> Result<Option<&'b [u8]>> {
-    let Some(section) = dt_dtb_attribute(bytes, pe)? else {
+fn base_dtb_bytes<'b>(
+    bytes: &'b [u8],
+    pe: &goblin::pe::PE<'_>,
+    section: Option<&str>,
+) -> Result<Option<&'b [u8]>> {
+    let Some(section) = section else {
         return Ok(None);
     };
-    let raw = section_raw(bytes, pe, &section)
+    let raw = section_raw(bytes, pe, section)
         .with_context(|| format!("dt:dtb names section `{section}`, absent from the PMI"))?;
     Ok(Some(raw))
-}
-
-/// The `dt:dtb` attribute (a PE section name) from the `.pmi.vm` CBOR manifest.
-fn dt_dtb_attribute(bytes: &[u8], pe: &goblin::pe::PE<'_>) -> Result<Option<String>> {
-    let cbor = section_raw(bytes, pe, ".pmi.vm").context(".pmi.vm section absent from the PMI")?;
-    let value: Value = ciborium::from_reader(cbor).context("decode .pmi.vm CBOR")?;
-    let Value::Map(entries) = value else {
-        bail!(".pmi.vm is not a CBOR map");
-    };
-    for (k, v) in &entries {
-        if matches!(k, Value::Text(t) if t == "dt:dtb") {
-            let name = v.as_text().context("dt:dtb attribute is not text")?;
-            return Ok(Some(name.to_owned()));
-        }
-    }
-    Ok(None)
 }
 
 /// Raw file bytes of the named PE section.
@@ -317,5 +334,27 @@ fn human(n: u64) -> String {
         format!("{} KiB", n / 1024)
     } else {
         format!("{n} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn present_dtb_attribute_requires_text() {
+        // Two-entry map: actions = [], dt:dtb = the appended CBOR value.
+        let prefix = b"\xa2\x67actions\x80\x66dt:dtb";
+        let mut text = prefix.to_vec();
+        text.extend_from_slice(b"\x64.dtb");
+        let manifest = Manifest::parse(&text).unwrap();
+        assert_eq!(manifest.dt_dtb.as_deref(), Some(".dtb"));
+
+        // CBOR null, undefined, and a URI-tagged string are not text values.
+        for non_text in [b"\xf6".as_slice(), b"\xf7", b"\xd8\x20\x64.dtb"] {
+            let mut bytes = prefix.to_vec();
+            bytes.extend_from_slice(non_text);
+            assert!(Manifest::parse(&bytes).is_err());
+        }
     }
 }
