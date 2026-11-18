@@ -8,9 +8,9 @@
 //! 1. A complete cpio newc archive, uncompressed or gzip/zstd compressed —
 //!    validated and passed through. Compressed module entries are rejected;
 //!    Linux decompresses an accepted outer archive at boot.
-//! 2. A statically-linked ELF executable — wrapped in a single-entry
-//!    cpio newc archive containing `/`, `/dev`, `/dev/console`, `/init`
-//!    and `TRAILER!!!`.
+//! 2. A statically-linked ELF executable — wrapped in a cpio newc archive
+//!    containing `/`, `/dev`, `/dev/console`, `/dev/null`, `/init` and
+//!    `TRAILER!!!`.
 //!
 //! Any other input — including dynamically-linked ELF binaries — is
 //! rejected. The kernel's PID 1 (`/init`) cannot resolve a dynamic
@@ -116,8 +116,8 @@ fn check_static_elf(bytes: &[u8]) -> Result<(), InitrdError> {
 /// already cpio, the original slice is returned borrowed (no copy —
 /// large initrds can be many MiB). Compressed module filenames anywhere
 /// in the archive are rejected. If the input is a static ELF, it
-/// is wrapped in a single-entry cpio archive at `/init`. Any other
-/// input is rejected.
+/// is wrapped as `/init` in a cpio archive with `/dev/console` and
+/// `/dev/null`. Any other input is rejected.
 ///
 /// Compressed archives are decoded only for validation; the original bytes
 /// are preserved, so the kernel needs the matching CONFIG_RD_GZIP/ZSTD driver.
@@ -278,6 +278,8 @@ pub(crate) fn materialize_modules(
         Some((5, 1)),
     )?;
     ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
+    checked_entry(&mut out, ino, 0o020_666, 1, "dev/null", &[], Some((1, 3)))?;
+    ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
     checked_entry(&mut out, ino, 0o100_755, 1, "init", input, None)?;
     for (name, bytes) in files {
         ino = ino.checked_add(1).ok_or(InitrdError::ArchiveTooLarge)?;
@@ -390,15 +392,18 @@ fn skip_padding(bytes: &[u8]) -> &[u8] {
 }
 
 /// Wrap a single executable in a minimal cpio newc archive.
+/// `/dev/null` lets the executable reopen standard descriptors before it can
+/// mount devtmpfs if the kernel could not open its initial console.
 ///
 /// Layout:
 ///   /                    (dir, nlink=3)
 ///   /dev                 (dir, nlink=2)
 ///   /dev/console         (char device, major 5 minor 1, rw-rw-rw-)
+///   /dev/null            (char device, major 1 minor 3, rw-rw-rw-)
 ///   /init                (executable, 0755, the input bytes)
 ///   TRAILER!!!           (sentinel)
 fn wrap_as_cpio(init_binary: &[u8]) -> Result<Vec<u8>, InitrdError> {
-    let mut out = Vec::with_capacity(512 + init_binary.len());
+    let mut out = Vec::with_capacity(768 + init_binary.len());
     checked_entry(&mut out, 1, 0o040_755, 3, ".", &[], None)?;
     checked_entry(&mut out, 2, 0o040_755, 2, "dev", &[], None)?;
     checked_entry(
@@ -410,7 +415,8 @@ fn wrap_as_cpio(init_binary: &[u8]) -> Result<Vec<u8>, InitrdError> {
         &[],
         Some((5, 1)),
     )?;
-    checked_entry(&mut out, 4, 0o100_755, 1, "init", init_binary, None)?;
+    checked_entry(&mut out, 4, 0o020_666, 1, "dev/null", &[], Some((1, 3)))?;
+    checked_entry(&mut out, 5, 0o100_755, 1, "init", init_binary, None)?;
     checked_entry(&mut out, 0, 0, 1, "TRAILER!!!", &[], None)?;
     Ok(out)
 }
@@ -436,10 +442,17 @@ mod tests {
             payload
         );
         assert_eq!(
-            entries["usr/lib/modules/7.2-test/kernel/drivers/test.ko"].1,
+            entries["usr/lib/modules/7.2-test/kernel/drivers/test.ko"]
+                .1
+                .mode(),
             0o100_644
         );
-        assert!(entries.contains_key("dev/console"));
+        for (name, device) in [("dev/console", (5, 1)), ("dev/null", (1, 3))] {
+            let (data, entry) = &entries[name];
+            assert!(data.is_empty());
+            assert_eq!(entry.mode(), 0o020_666);
+            assert_eq!((entry.rdev_major(), entry.rdev_minor()), device);
+        }
         assert!(!entries.keys().any(|name| name.ends_with("modules.dep")));
     }
 
@@ -555,11 +568,13 @@ mod tests {
         assert!(materialize_modules(&binary, "7.2-test", &collision).is_err());
     }
 
-    fn inspect_newc(mut bytes: &[u8]) -> std::collections::BTreeMap<String, (Vec<u8>, u32)> {
+    fn inspect_newc(
+        mut bytes: &[u8],
+    ) -> std::collections::BTreeMap<String, (Vec<u8>, cpio::newc::Entry)> {
         let mut entries = std::collections::BTreeMap::new();
         loop {
             let mut reader = cpio::newc::Reader::new(bytes).unwrap();
-            let entry = reader.entry();
+            let entry = reader.entry().clone();
             assert_eq!(entry.uid(), 0);
             assert_eq!(entry.gid(), 0);
             assert_eq!(entry.mtime(), 0);
@@ -567,10 +582,9 @@ mod tests {
                 break;
             }
             let name = entry.name().to_owned();
-            let mode = entry.mode();
             let mut data = Vec::new();
             reader.read_to_end(&mut data).unwrap();
-            assert!(entries.insert(name, (data, mode)).is_none());
+            assert!(entries.insert(name, (data, entry)).is_none());
             bytes = reader.finish().unwrap();
         }
         entries
@@ -683,10 +697,14 @@ mod tests {
         assert!(matches!(out, Cow::Owned(_)));
         assert!(is_cpio(&out));
         assert!(out.windows(b"TRAILER!!!".len()).any(|w| w == b"TRAILER!!!"));
-        assert!(
-            out.windows(b"dev/console".len())
-                .any(|w| w == b"dev/console")
-        );
+        let entries = inspect_newc(&out);
+        assert_eq!(entries["init"].0, elf);
+        for (name, device) in [("dev/console", (5, 1)), ("dev/null", (1, 3))] {
+            let (data, entry) = &entries[name];
+            assert!(data.is_empty());
+            assert_eq!(entry.mode(), 0o020_666);
+            assert_eq!((entry.rdev_major(), entry.rdev_minor()), device);
+        }
     }
 
     #[test]
