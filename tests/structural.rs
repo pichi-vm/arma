@@ -562,22 +562,16 @@ fn vcpu_register_validity_aarch64() {
     // pstate.M[3:0] = 0x5 (EL1h); M[4] = 0 (AArch64).
     assert_eq!(spec.vcpu.pstate.get() & 0xF, 0x5);
     assert_eq!((spec.vcpu.pstate.get() >> 4) & 1, 0);
-    // pc lies inside .tatu.text.
+    // The linked ARM reset section starts at the fixed PMI address.
     let pe = goblin::pe::PE::parse(&f.pmi_bytes).unwrap();
-    let text = pe
+    let reset = pe
         .sections
         .iter()
-        .find(|s| s.name().unwrap_or("") == ".tatu.text")
-        .expect(".tatu.text present");
-    let lo = text.virtual_address as u64;
-    let hi = lo + text.virtual_size as u64;
-    assert!(
-        spec.vcpu.pc >= lo && spec.vcpu.pc < hi,
-        "pc {:#x} must lie in .tatu.text [{:#x}, {:#x})",
-        spec.vcpu.pc,
-        lo,
-        hi
-    );
+        .find(|s| s.name().unwrap_or("") == ".tatu.reset.aarch64")
+        .expect("ARM reset section");
+    assert_eq!(spec.vcpu.pc, 0);
+    assert_eq!(reset.virtual_address, 0);
+    assert!(reset.size_of_raw_data > 0);
 }
 
 // ---------------------------------------------------------------------------

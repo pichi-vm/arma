@@ -27,19 +27,19 @@ mod reset {
     #[unsafe(link_section = ".tatu.bootinfo")]
     static BOOTINFO: TatuBootInfo = TatuBootInfo::ZERO;
 
-    /// Entry stub in `.tatu.reset.aarch64`, which the single
-    /// `linker/tatu.ld` positions first inside `.tatu.text` so the
-    /// `reset` symbol is the kernel-visible entry. (The x86 stub uses a
-    /// distinct `.tatu.reset.x86_64` routed to the reset vector instead.)
+    /// Reset stub in `.tatu.reset.aarch64`, which `linker/tatu.ld` places
+    /// at GPA 0, the fixed PMI boot address. The x86 stub uses
+    /// `.tatu.reset.x86_64` instead.
     ///
     /// SAFETY: PC-relative adrp/add+:lo12: resolves STACK and
     /// BOOTINFO at link time; adding STACK_SIZE yields the top of
     /// the 64 KiB stack. rust_main is the cross-arch lifecycle
     /// entry; it never returns. AAPCS: first arg in X0, so
-    /// rust_main receives `bootinfo: &TatuBootInfo`. Interrupts
-    /// are masked (DAIF set by arma).
-    /// `#[unsafe(no_mangle)]` is the keep-alive anchor — see
-    /// the matching note in arch_x86_64.
+    /// rust_main receives `bootinfo: &TatuBootInfo`. PMI supplies EL1h with
+    /// DAIF masked and MMU/caches off. The softfloat, strict-align target
+    /// uses no FP/SIMD or unaligned memory instructions, so it does not rely
+    /// on CPACR_EL1 or on permissive SCTLR_EL1 alignment settings.
+    /// `no_mangle` keeps the naked entry alive until linker KEEP retains it.
     #[unsafe(naked)]
     #[unsafe(no_mangle)]
     #[unsafe(link_section = ".tatu.reset.aarch64")]

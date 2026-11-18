@@ -230,24 +230,14 @@ mod tests {
     fn parses_aarch64_tatu_elf() {
         use crate::TATU_AARCH64;
         let img = parse(TATU_AARCH64, Arch::Aarch64).unwrap();
-        // Entry MUST be inside .tatu.text (which contains the
-        // aarch64 reset stub from .tatu.reset, collapsed in by
-        // the linker's KEEP(*(.tatu.reset)) inside .tatu.text).
-        let text = img
-            .sections
-            .iter()
-            .find(|s| s.name == ".tatu.text")
-            .expect(".tatu.text section present");
-        assert!(
-            img.entry >= text.vaddr && img.entry < text.vaddr + text.virtual_size,
-            "e_entry {:#x} must lie inside .tatu.text [{:#x}, {:#x})",
-            img.entry,
-            text.vaddr,
-            text.vaddr + text.virtual_size
-        );
+        assert_eq!(Elf::parse(TATU_AARCH64).unwrap().header.e_entry, 0);
+        let entry = img.section(".tatu.reset.aarch64").expect("entry section");
+        assert_eq!(entry.vaddr, 0);
+        assert!(!entry.is_nobits);
+        assert!(!entry.data.is_empty());
         // .tatu.bootinfo present.
         assert!(img.sections.iter().any(|s| s.is_bootinfo));
-        // The unified linker packs aarch64 from GPA 0 (stack first).
+        // The unified linker packs aarch64 from GPA 0 (entry first).
         let first = img.sections.first().unwrap();
         assert_eq!(first.vaddr, 0x0);
     }
