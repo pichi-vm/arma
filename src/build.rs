@@ -17,8 +17,7 @@ pub(crate) use crate::manifest::DtbMode;
 /// Resolve `(mmio_slots, pci_slots)` (device-model.md §6 Slot composition).
 /// With `--config`, infer/validate against kernel support; without it, honor
 /// explicit slots, else default to a PCI bridge (TODO C5: embedded IKCONFIG).
-/// Load the kernel build config used for slot inference (C4) AND the profile
-/// floor clamp (C2): `--config` if given, else the kernel's embedded
+/// Load the kernel build config: `--config` if given, else the kernel's embedded
 /// CONFIG_IKCONFIG (C5), else error (device-model §6).
 fn load_kernel_config(args: &BuildArgs, kernel: &[u8]) -> Result<kconfig::KernelConfig> {
     match &args.config_path {
@@ -332,15 +331,11 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     let bootinfo_section_bytes = bi.to_section_bytes();
 
     // ---- Step 10: CBOR manifest ----
-    // C2: --profile defaults to RHEL 9's baseline, then is clamped UP to the
-    // kernel's ISA build floor (so a higher-built kernel can't get a profile
-    // below what it requires); an explicit --profile may raise it further.
     let baseline = match arch {
         kernel::Arch::Aarch64 => "armv8.0-a",
         kernel::Arch::X86_64 => "x86-64-v2",
     };
-    let chosen = args.profile.as_deref().unwrap_or(baseline);
-    let cpu_profile = kconfig::raise_to_floor(chosen, kcfg.isa_floor(arch), arch);
+    let cpu_profile = args.profile.as_deref().unwrap_or(baseline);
     // Explicit action GPAs (pmi spec f6be1eb): the planner's placement for the
     // kernel/initrd/relocs; tatu sections and the dtbo fill carry their ELF
     // vaddr (resolved inside build_actions).
@@ -350,7 +345,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         bootconfig: lay.bootconfig.as_ref().map(|r| r.start),
         relocs: lay.relocs.as_ref().map(|r| r.start),
     };
-    let cbor = manifest::build_pmi_vm(&tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
+    let cbor = manifest::build_pmi_vm(&tatu_img, action_gpas, cpu_profile, args.dtb_mode)
         .context("build CBOR manifest")?;
 
     // Detached mode: the base DTB is delivered out-of-band, so write the
