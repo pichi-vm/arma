@@ -23,6 +23,7 @@ const LAPIC_BASE: u64 = 0xFEE0_0000;
 const LAPIC_SIZE: u64 = 0x1000;
 const IOAPIC_BASE: u64 = 0xFEC0_0000;
 const IOAPIC_SIZE: u64 = 0x1000;
+const IOAPIC_PIN_COUNT: u32 = 24;
 
 const LAPIC_PHANDLE: u32 = 1;
 const IOAPIC_PHANDLE: u32 = 2;
@@ -127,12 +128,17 @@ pub(super) fn add_platform(
         fdt.end_node(s)?;
     }
 
-    // A7 (x86): one virtio_mmio transport per slot, IO-APIC pin 16+. Addresses
-    // are planner-assigned (Inputs::virtio); the IRQ pin is positional.
-    for (i, v) in inputs.virtio.iter().enumerate() {
+    // Preserve the existing pins starting at 16 before using lower pins.
+    // Linux x86 ACPI excludes GSIs 0 and 2. Keep pin 4 reserved for the UART.
+    let mut pins = (VIRTIO_MMIO_PIN_BASE..IOAPIC_PIN_COUNT)
+        .chain(0..VIRTIO_MMIO_PIN_BASE)
+        .filter(|&pin| !matches!(pin, 0 | 2 | SERIAL_IOAPIC_PIN));
+    for v in inputs.virtio {
         let base = v.start;
         let size = v.end - v.start;
-        let pin = VIRTIO_MMIO_PIN_BASE + i as u32;
+        let pin = pins.next().ok_or(DtbError::X86VirtioMmioIoapicExhausted {
+            requested: inputs.virtio.len(),
+        })?;
         let n = fdt.begin_node(&format!("virtio_mmio@{base:x}"))?;
         fdt.property_string("compatible", "virtio,mmio")?;
         fdt.property_array_u32(
