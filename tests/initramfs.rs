@@ -7,14 +7,14 @@ mod common;
 use std::process::Command;
 
 use devtree::{NodeView, PropertyView, Tree, TreeView};
-use pmi::vm::{Action, FillKind, Spec, vcpu};
+use pmi::vm::{Action, FillKind, Spec};
 use rstest::rstest;
 use tempfile::TempDir;
 
 #[cfg(target_arch = "x86_64")]
-type CpuState = vcpu::x86_64::CpuState;
+type Profile = pmi::x86_64::Profile;
 #[cfg(target_arch = "aarch64")]
-type CpuState = vcpu::aarch64::CpuState;
+type Profile = pmi::aarch64::Profile;
 
 const GRAN: u64 = 2 * 1024 * 1024;
 
@@ -115,7 +115,7 @@ fn complete_initramfs_reaches_pmi_unchanged(#[case] archive: &[u8]) {
     );
     assert!(!pe.sections.iter().any(|s| s.name().unwrap() == ".bconf"));
     let (off, len) = common::find_pmi_vm(&bytes);
-    let spec: Spec<CpuState> = ciborium::from_reader(&bytes[off..off + len]).unwrap();
+    let spec: Spec<Profile> = ciborium::from_reader(&bytes[off..off + len]).unwrap();
     assert!(!spec.actions.iter().any(|action| matches!(action,
         Action::Fill(fill) if fill.kind == FillKind::LbcBootconfig
     )));

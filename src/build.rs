@@ -350,7 +350,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         bootconfig: lay.bootconfig.as_ref().map(|r| r.start),
         relocs: lay.relocs.as_ref().map(|r| r.start),
     };
-    let cbor = manifest::build_pmi_vm(arch, &tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
+    let cbor = manifest::build_pmi_vm(&tatu_img, action_gpas, &cpu_profile, args.dtb_mode)
         .context("build CBOR manifest")?;
 
     // Detached mode: the base DTB is delivered out-of-band, so write the

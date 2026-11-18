@@ -17,7 +17,7 @@ use std::process::Command;
 
 use burrow::{Entry, KERNELS, resolve};
 use ciborium::de::from_reader;
-use pmi::vm::{Spec, vcpu};
+use pmi::vm::Spec;
 use tempfile::TempDir;
 
 use common::{arma_bin, find_pmi_vm};
@@ -122,11 +122,11 @@ fn assert_well_formed(bytes: &[u8]) {
     let (off, size) = find_pmi_vm(bytes);
     let manifest = &bytes[off..off + size];
     let actions = match host::ARCH {
-        "x86_64" => from_reader::<Spec<vcpu::x86_64::CpuState>, _>(manifest)
+        "x86_64" => from_reader::<Spec<pmi::x86_64::Profile>, _>(manifest)
             .expect("decode x86 .pmi.vm")
             .actions
             .len(),
-        _ => from_reader::<Spec<vcpu::aarch64::CpuState>, _>(manifest)
+        _ => from_reader::<Spec<pmi::aarch64::Profile>, _>(manifest)
             .expect("decode arm .pmi.vm")
             .actions
             .len(),
