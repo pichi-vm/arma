@@ -138,11 +138,17 @@ pub(crate) fn run(pmi_path: &Path) -> Result<()> {
     let mut regions: Vec<Region> = Vec::new();
     for action in manifest.actions {
         let Action { section: name, gpa } = action;
-        let section = pe
+        let mut matches = pe
             .sections
             .iter()
-            .find(|s| s.name().unwrap_or("").trim_end_matches('\0') == name)
+            .filter(|s| s.name().unwrap_or("").trim_end_matches('\0') == name);
+        let section = matches
+            .next()
             .with_context(|| format!("action names section `{name}`, absent from the PMI"))?;
+        ensure!(
+            matches.next().is_none(),
+            "action names ambiguous PE section `{name}`"
+        );
         let size = u64::from(section.virtual_size);
         gpa.checked_add(size)
             .with_context(|| format!("action range for `{name}` overflows"))?;
@@ -417,6 +423,49 @@ mod tests {
 
     use super::*;
     use crate::pe::{Section, build_pe};
+
+    #[test]
+    fn ambiguous_action_section_is_not_reported_as_a_clean_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ambiguous.pmi");
+        let value = cbor!({"actions" => [
+            {"type" => "load", "gpa" => 0, "section" => ".data"},
+        ]})
+        .unwrap();
+        let mut manifest = Vec::new();
+        ciborium::into_writer(&value, &mut manifest).unwrap();
+        let payload = Section {
+            name: ".data".into(),
+            vaddr: 0,
+            virtual_size: 0x1000,
+            data: Cow::Borrowed(&[0]),
+            characteristics: 0,
+            non_loaded: false,
+        };
+        let mut sections = [
+            payload.clone(),
+            Section {
+                virtual_size: 0x2000,
+                ..payload
+            },
+            Section {
+                name: ".pmi.vm".into(),
+                vaddr: 0,
+                virtual_size: manifest.len() as u64,
+                data: Cow::Owned(manifest),
+                characteristics: 0,
+                non_loaded: true,
+            },
+        ];
+        for _ in 0..2 {
+            std::fs::write(&path, build_pe(0x8664, &sections).unwrap()).unwrap();
+            assert_eq!(
+                run(&path).unwrap_err().to_string(),
+                "action names ambiguous PE section `.data`"
+            );
+            sections.swap(0, 1);
+        }
+    }
 
     #[test]
     fn zero_gpa_actions_participate_in_layout_checks() {
