@@ -133,11 +133,11 @@ pub(super) fn add_platform(
     let mut pins = (VIRTIO_MMIO_PIN_BASE..IOAPIC_PIN_COUNT)
         .chain(0..VIRTIO_MMIO_PIN_BASE)
         .filter(|&pin| !matches!(pin, 0 | 2 | SERIAL_IOAPIC_PIN));
-    for v in inputs.virtio {
+    for v in inputs.virtio.iter() {
         let base = v.start;
         let size = v.end - v.start;
         let pin = pins.next().ok_or(DtbError::X86VirtioMmioIoapicExhausted {
-            requested: inputs.virtio.len(),
+            requested: inputs.virtio.iter().len(),
         })?;
         let n = fdt.begin_node(&format!("virtio_mmio@{base:x}"))?;
         fdt.property_string("compatible", "virtio,mmio")?;

@@ -31,6 +31,8 @@ use core::ops::Range;
 
 use thiserror::Error;
 
+use crate::mmio_slots::MmioSlots;
+
 /// PMI large-section granularity (2 MiB). Per the PMI section-shape contract
 /// (`pmi/spec/granularity.md`), a LARGE section is 2 MiB-aligned and occupies
 /// whole 2 MiB units so a conformant VMM can map it with huge pages. The
@@ -40,8 +42,6 @@ use thiserror::Error;
 const GRAN: u64 = 2 * 1024 * 1024;
 /// ns16550a MMIO window (one page).
 const SERIAL_SIZE: u64 = 0x1000;
-/// One virtio-mmio transport window.
-const VIRTIO_SIZE: u64 = 0x200;
 /// ECAM: one bus = 1 MiB of config space.
 const ECAM_PER_BUS: u64 = 0x10_0000;
 /// ECAM buses (`bus-range = <0 0x0f>`). Must match `base_dtb::ECAM_BUSES`.
@@ -89,7 +89,7 @@ pub(crate) struct Planner<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct Layout {
     pub(crate) serial: Option<Range<u64>>,
-    pub(crate) virtio: Vec<Range<u64>>,
+    pub(crate) virtio: MmioSlots,
     pub(crate) ecam: Option<Range<u64>>,
     pub(crate) pci_window: Option<Range<u64>>,
     pub(crate) linux: Range<u64>,
@@ -207,9 +207,9 @@ impl Planner<'_> {
                     size: band_size,
                 });
             }
-            self.carve_band(band.start)
+            self.carve_band(band.start)?
         } else {
-            (None, Vec::new(), None)
+            (None, MmioSlots::default(), None)
         };
 
         Ok(Layout {
@@ -237,7 +237,7 @@ impl Planner<'_> {
         if self.args.serial {
             size += SERIAL_SIZE;
         }
-        size += u64::from(self.args.mmio_slots) * VIRTIO_SIZE;
+        size += u64::from(self.args.mmio_slots) * MmioSlots::SIZE;
         if size == 0 {
             return (0, GRAN);
         }
@@ -247,7 +247,10 @@ impl Planner<'_> {
     /// Subdivide the band at `base`: ECAM first (largest alignment, lands on
     /// the band's 1 MiB boundary), then serial, then the virtio transports
     /// (0x200 stride). Mirrors [`Self::band_geometry`].
-    fn carve_band(&self, base: u64) -> (Option<Range<u64>>, Vec<Range<u64>>, Option<Range<u64>>) {
+    fn carve_band(
+        &self,
+        base: u64,
+    ) -> Result<(Option<Range<u64>>, MmioSlots, Option<Range<u64>>), PlanError> {
         let mut cur = base;
         let ecam = (self.args.pci_slots > 0).then(|| {
             let r = cur..cur + ECAM_SIZE;
@@ -259,14 +262,8 @@ impl Planner<'_> {
             cur += SERIAL_SIZE;
             r
         });
-        let virtio = (0..self.args.mmio_slots)
-            .map(|_| {
-                let r = cur..cur + VIRTIO_SIZE;
-                cur += VIRTIO_SIZE;
-                r
-            })
-            .collect();
-        (serial, virtio, ecam)
+        let virtio = MmioSlots::new(cur, self.args.mmio_slots).ok_or(PlanError::Overflow)?;
+        Ok((serial, virtio, ecam))
     }
 }
 
@@ -364,6 +361,7 @@ mod tests {
         assert!(lay.pci_window.is_none());
         assert!(lay.initrd.is_none());
         assert!(lay.bootconfig.is_none());
+        assert_eq!(lay.virtio.iter().len(), 0);
     }
 
     #[test]
@@ -531,11 +529,12 @@ mod tests {
         // serial immediately follows ECAM; virtio transports follow serial,
         // each 0x200, contiguous.
         assert_eq!(serial.start, ecam.end);
-        assert_eq!(lay.virtio.len(), 3);
-        assert_eq!(lay.virtio[0].start, serial.end);
-        for w in lay.virtio.windows(2) {
-            assert_eq!(w[1].start, w[0].end);
-            assert_eq!(w[0].end - w[0].start, VIRTIO_SIZE);
+        let slots = lay.virtio.iter();
+        assert_eq!(slots.len(), 3);
+        let mut start = serial.end;
+        for slot in slots {
+            assert_eq!(slot, start..start + MmioSlots::SIZE);
+            start = slot.end;
         }
         // band avoids the kernel and tatu.
         assert!(ecam.start >= lay.linux.end || ecam.end <= lay.linux.start);

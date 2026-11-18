@@ -27,6 +27,7 @@ use thiserror::Error;
 use vm_fdt::{Error as FdtError, FdtWriter};
 
 use crate::kernel::Arch;
+use crate::mmio_slots::MmioSlots;
 
 /// Per-build inputs to the DTB. Device GPAs/sizes are decided by the
 /// [`crate::planner`] and passed in here as ranges.
@@ -39,7 +40,7 @@ pub(crate) struct Inputs<'a> {
     /// ns16550a serial MMIO range, if a serial port is declared.
     pub(crate) serial: Option<Range<u64>>,
     /// virtio-mmio transport ranges (one per slot), in declaration order.
-    pub(crate) virtio: &'a [Range<u64>],
+    pub(crate) virtio: MmioSlots,
     /// ECAM range, if a PCIe host bridge is declared (`None` ⇒ no bridge).
     pub(crate) ecam: Option<Range<u64>>,
     /// PCIe 64-bit BAR window range, present iff `ecam` is.
@@ -213,7 +214,7 @@ mod tests {
             cmdline: "console=ttyS0",
             initrd: Some((0x0500_0000, 0x10_0000)),
             serial: Some(0x0900_0000..0x0900_1000),
-            virtio: &[],
+            virtio: MmioSlots::default(),
             ecam: Some(0x1000_0000..0x1100_0000),
             // default x86 X=39/B=37 ⇒ window at 2^38, size 2^37.
             pci_window: Some((1 << 38)..((1 << 38) + (1 << 37))),
@@ -226,7 +227,7 @@ mod tests {
             cmdline: "console=hvc0",
             initrd: None,
             serial: Some(0x0A11_0000..0x0A11_1000),
-            virtio: &[],
+            virtio: MmioSlots::default(),
             ecam: Some(0x0A20_0000..0x0B20_0000),
             // default aarch64 X=36/B=34 ⇒ window at 2^35, size 2^34.
             pci_window: Some((1 << 35)..((1 << 35) + (1 << 34))),
@@ -258,16 +259,11 @@ mod tests {
     fn x86_virtio_mmio_pins_fit_ioapic() {
         use devtree::{NodeView, PropertyView, Tree, TreeView};
 
-        let virtio: Vec<_> = (0..22)
-            .map(|i| {
-                let base = 0x0900_1000 + i * 0x200;
-                base..base + 0x200
-            })
-            .collect();
+        let virtio = MmioSlots::new(0x0900_1000, 21).unwrap();
         for serial in [None, x86_inputs().serial] {
             let inputs = Inputs {
                 serial,
-                virtio: &virtio[..21],
+                virtio,
                 ..x86_inputs()
             };
             let bytes = build(&inputs).expect("build DTB with all available IOAPIC pins");
@@ -290,7 +286,7 @@ mod tests {
         }
 
         let exhausted = Inputs {
-            virtio: &virtio,
+            virtio: MmioSlots::new(0x0900_1000, 22).unwrap(),
             ..x86_inputs()
         };
         assert!(matches!(
@@ -375,14 +371,8 @@ mod tests {
     #[test]
     fn aarch64_serial_and_virtio_mmio() {
         use devtree::{NodeView, PropertyView, Tree, TreeView};
-        let virtio: Vec<Range<u64>> = (0..3)
-            .map(|i| {
-                let b = 0x0A11_1000 + i * 0x200;
-                b..b + 0x200
-            })
-            .collect();
         let inputs = Inputs {
-            virtio: &virtio,
+            virtio: MmioSlots::new(0x0A11_1000, 3).unwrap(),
             ..arm_inputs()
         };
         let bytes = build(&inputs).expect("build");
@@ -436,14 +426,9 @@ mod tests {
     fn aarch64_virtio_mmio_spis_skip_msi_and_stop_at_gic_limit() {
         use devtree::{NodeView, PropertyView, Tree, TreeView};
 
-        let virtio: Vec<_> = (0..941)
-            .map(|i| {
-                let base = 0x0A11_1000 + i * 0x200;
-                base..base + 0x200
-            })
-            .collect();
+        let virtio = MmioSlots::new(0x0A11_1000, 940).unwrap();
         let inputs = Inputs {
-            virtio: &virtio[..940],
+            virtio,
             ..arm_inputs()
         };
         let bytes = build(&inputs).expect("build DTB with last classic SPI");
@@ -454,14 +439,14 @@ mod tests {
         assert_eq!(v2m.property("arm,msi-num-spis").unwrap().as_u32(), Some(32));
 
         for (index, pin) in [(15, 31), (16, 64), (939, 987)] {
-            let base = virtio[index].start;
+            let base = virtio.iter().nth(index).unwrap().start;
             let node = tree.find_path(&format!("/virtio_mmio@{base:x}")).unwrap();
             let cells = node.property("interrupts").unwrap();
             assert_eq!(cells.as_u32s().unwrap().collect::<Vec<_>>(), [0, pin, 1]);
         }
 
         let exhausted = Inputs {
-            virtio: &virtio,
+            virtio: MmioSlots::new(0x0A11_1000, 941).unwrap(),
             ..inputs
         };
         assert!(matches!(

@@ -279,7 +279,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
         cmdline: &cmdline,
         initrd: initrd_extent,
         serial: lay.serial.clone(),
-        virtio: &lay.virtio,
+        virtio: lay.virtio,
         ecam: lay.ecam.clone(),
         pci_window: lay.pci_window.clone(),
     })

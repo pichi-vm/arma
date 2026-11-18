@@ -166,13 +166,13 @@ pub(super) fn add_platform(
     let msi_intids = MSI_INTID_BASE..MSI_INTID_BASE + MSI_INTID_COUNT;
     let mut wired_spis = (VIRTIO_MMIO_SPI_BASE..=SPI_PIN_MAX)
         .filter(|pin| !msi_intids.contains(&(pin + SPI_INTID_BASE)));
-    for v in inputs.virtio {
+    for v in inputs.virtio.iter() {
         let base = v.start;
         let size = v.end - v.start;
         let spi = wired_spis
             .next()
             .ok_or(DtbError::ArmVirtioMmioSpiExhausted {
-                requested: inputs.virtio.len(),
+                requested: inputs.virtio.iter().len(),
             })?;
         let n = fdt.begin_node(&format!("virtio_mmio@{base:x}"))?;
         fdt.property_string("compatible", "virtio,mmio")?;
