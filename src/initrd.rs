@@ -558,27 +558,20 @@ mod tests {
     fn inspect_newc(mut bytes: &[u8]) -> std::collections::BTreeMap<String, (Vec<u8>, u32)> {
         let mut entries = std::collections::BTreeMap::new();
         loop {
-            let number =
-                |a, b| u32::from_str_radix(std::str::from_utf8(&bytes[a..b]).unwrap(), 16).unwrap();
-            let mode = number(14, 22);
-            assert_eq!(number(22, 30), 0);
-            assert_eq!(number(30, 38), 0);
-            assert_eq!(number(46, 54), 0);
-            let size = number(54, 62) as usize;
-            let namesize = number(94, 102) as usize;
-            let name = std::str::from_utf8(&bytes[110..110 + namesize - 1])
-                .unwrap()
-                .to_string();
-            let start = (110 + namesize + 3) & !3;
-            if name == "TRAILER!!!" {
+            let mut reader = cpio::newc::Reader::new(bytes).unwrap();
+            let entry = reader.entry();
+            assert_eq!(entry.uid(), 0);
+            assert_eq!(entry.gid(), 0);
+            assert_eq!(entry.mtime(), 0);
+            if entry.is_trailer() {
                 break;
             }
-            assert!(
-                entries
-                    .insert(name, (bytes[start..start + size].to_vec(), mode))
-                    .is_none()
-            );
-            bytes = &bytes[(start + size + 3) & !3..];
+            let name = entry.name().to_owned();
+            let mode = entry.mode();
+            let mut data = Vec::new();
+            reader.read_to_end(&mut data).unwrap();
+            assert!(entries.insert(name, (data, mode)).is_none());
+            bytes = reader.finish().unwrap();
         }
         entries
     }
