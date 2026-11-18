@@ -171,6 +171,34 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn firmware_sections_fit_nonoverlapping_slabs() {
+        #[cfg(target_arch = "x86_64")]
+        let image = parse(crate::TATU_X86_64, Arch::X86_64).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        let image = parse(crate::TATU_AARCH64, Arch::Aarch64).unwrap();
+        let ranges: Vec<_> = image.reserved().collect();
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[0].end <= pair[1].start,
+                "overlapping firmware sections"
+            );
+        }
+        for section in &image.sections {
+            assert_eq!(section.vaddr % 4096, 0, "{}", section.name);
+            if section.name == ".tatu.reset.x86_64" {
+                assert_eq!(section.vaddr + section.virtual_size, 0x1_0000_0000);
+            } else {
+                assert!(
+                    section.vaddr + section.virtual_size <= 0x20_0000,
+                    "{} exceeds firmware slab",
+                    section.name
+                );
+            }
+        }
+    }
+
+    #[test]
     #[cfg(target_arch = "x86_64")]
     fn parses_x86_64_tatu_elf() {
         use crate::TATU_X86_64;
@@ -184,12 +212,12 @@ mod tests {
             .find(|s| s.is_bootinfo)
             .expect(".tatu.bootinfo section present");
         assert_eq!(bi.virtual_size, 4096);
-        // .tatu.reset MUST end at 0x100000000.
+        // .tatu.reset.x86_64 MUST end at 0x100000000.
         let rv = img
             .sections
             .iter()
-            .find(|s| s.name == ".tatu.reset")
-            .expect(".tatu.reset section present");
+            .find(|s| s.name == ".tatu.reset.x86_64")
+            .expect(".tatu.reset.x86_64 section present");
         assert_eq!(rv.vaddr + rv.virtual_size, 0x1_0000_0000);
         // Sections sorted by vaddr.
         for w in img.sections.windows(2) {
