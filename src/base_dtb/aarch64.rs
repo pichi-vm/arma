@@ -30,7 +30,7 @@ const SERIAL_CLK_HZ: u32 = 3_686_400; // 16550 reference clock
 const SERIAL_CURRENT_SPEED: u32 = 115_200;
 const SERIAL_SPI: u32 = 1; // GIC SPI 1, level-high
 
-const VIRTIO_MMIO_SPI_BASE: u32 = 16; // SPI 16, 17, … (edge), one per transport
+const VIRTIO_MMIO_SPI_BASE: u32 = 16; // First edge-triggered SPI pin for virtio-mmio
 
 pub(super) const INTC_PHANDLE: u32 = 1;
 pub(super) const V2M_PHANDLE: u32 = 3;
@@ -48,9 +48,11 @@ pub(super) fn reserved() -> Vec<Range<u64>> {
     ]
 }
 
-// MSI interrupt-id window within the SPI range (Apple hv_gic SPI range is
-// [32, +988]). Wired SPIs (serial = 1, virtio-mmio = 16…) stay below 64; the
-// GICv2m frame uses 64..95 for message-based PCIe MSI.
+// GICv3 DT SPI pins are 0..=987, starting at GIC INTID 32.
+const SPI_INTID_BASE: u32 = 32;
+const SPI_PIN_MAX: u32 = 987;
+
+// GICv2m MSI properties use absolute INTIDs.
 const MSI_INTID_BASE: u32 = 64;
 const MSI_INTID_COUNT: u32 = 32;
 
@@ -161,11 +163,17 @@ pub(super) fn add_platform(
     // virtio_mmio@… — one transport per slot (A7). Addresses are
     // planner-assigned (Inputs::virtio); each gets its own GIC SPI (edge,
     // positional); the guest probes magic/DeviceID for occupancy.
-    for (i, v) in inputs.virtio.iter().enumerate() {
+    let msi_intids = MSI_INTID_BASE..MSI_INTID_BASE + MSI_INTID_COUNT;
+    let mut wired_spis = (VIRTIO_MMIO_SPI_BASE..=SPI_PIN_MAX)
+        .filter(|pin| !msi_intids.contains(&(pin + SPI_INTID_BASE)));
+    for v in inputs.virtio {
         let base = v.start;
         let size = v.end - v.start;
-        let spi = VIRTIO_MMIO_SPI_BASE + i as u32;
-        debug_assert!(spi < MSI_INTID_BASE, "virtio-mmio SPIs must stay below MSI");
+        let spi = wired_spis
+            .next()
+            .ok_or(DtbError::ArmVirtioMmioSpiExhausted {
+                requested: inputs.virtio.len(),
+            })?;
         let n = fdt.begin_node(&format!("virtio_mmio@{base:x}"))?;
         fdt.property_string("compatible", "virtio,mmio")?;
         fdt.property_array_u32(

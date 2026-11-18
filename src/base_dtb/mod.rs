@@ -50,6 +50,8 @@ pub(crate) struct Inputs<'a> {
 pub(crate) enum DtbError {
     #[error(transparent)]
     Fdt(#[from] FdtError),
+    #[error("Arm GIC ran out of wired SPIs for {requested} virtio-mmio slots")]
+    ArmVirtioMmioSpiExhausted { requested: usize },
 }
 
 /// ECAM buses (`bus-range = <0 0x0f>`). Must match `planner::ECAM_BUSES`.
@@ -381,5 +383,43 @@ mod tests {
             exp.extend_from_slice(&1u32.to_be_bytes()); // edge-rising
             assert_eq!(n.property("interrupts").unwrap().as_ref(), exp.as_slice());
         }
+    }
+
+    #[test]
+    fn aarch64_virtio_mmio_spis_skip_msi_and_stop_at_gic_limit() {
+        use devtree::{NodeView, PropertyView, Tree, TreeView};
+
+        let virtio: Vec<_> = (0..941)
+            .map(|i| {
+                let base = 0x0A11_1000 + i * 0x200;
+                base..base + 0x200
+            })
+            .collect();
+        let inputs = Inputs {
+            virtio: &virtio[..940],
+            ..arm_inputs()
+        };
+        let bytes = build(&inputs).expect("build DTB with last classic SPI");
+        let tree: Tree<'_> = Tree::parse(&bytes).expect("parse DTB");
+
+        let v2m = tree.find_path("/msi-controller@a100000").unwrap();
+        assert_eq!(v2m.property("arm,msi-base-spi").unwrap().as_u32(), Some(64));
+        assert_eq!(v2m.property("arm,msi-num-spis").unwrap().as_u32(), Some(32));
+
+        for (index, pin) in [(15, 31), (16, 64), (939, 987)] {
+            let base = virtio[index].start;
+            let node = tree.find_path(&format!("/virtio_mmio@{base:x}")).unwrap();
+            let cells = node.property("interrupts").unwrap();
+            assert_eq!(cells.as_u32s().unwrap().collect::<Vec<_>>(), [0, pin, 1]);
+        }
+
+        let exhausted = Inputs {
+            virtio: &virtio,
+            ..inputs
+        };
+        assert!(matches!(
+            build(&exhausted),
+            Err(DtbError::ArmVirtioMmioSpiExhausted { requested: 941 })
+        ));
     }
 }
