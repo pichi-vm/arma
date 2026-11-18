@@ -499,9 +499,9 @@ the platform's addressing and identity.
 - **`--cmdline <string>`** _(required)_ — kernel command line. Arma never
   supplies a default.
 - **`--profile <profile>`** — vCPU ISA baseline, written to `cpu:profile`; the
-  VMM validates it against the host. Defaults to RHEL 9's baseline so a stock
-  RHEL guest runs — `x86-64-v2` (x86-64) or `armv8.0-a` (aarch64).
-  An explicit profile is preserved without adjustment from kernel configuration.
+  VMM validates it against the host. If omitted, Arma omits the attribute and
+  the VMM uses PMI's architecture default (`x86-64-v1` or `armv8.0-a`). An
+  explicit profile is preserved without adjustment from kernel configuration.
 - **`--serial`** — declare the serial port. Absent ⇒ no UART node.
 - **`--mmio-slots <N>`** — virtio-mmio transport count (see Slot composition).
 - **`--pci-slots <N>`** — PCIe slot count; `0` ⇒ no host bridge **and no 64-bit

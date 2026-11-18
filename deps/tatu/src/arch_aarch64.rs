@@ -35,10 +35,11 @@ mod reset {
     /// BOOTINFO at link time; adding STACK_SIZE yields the top of
     /// the 64 KiB stack. rust_main is the cross-arch lifecycle
     /// entry; it never returns. AAPCS: first arg in X0, so
-    /// rust_main receives `bootinfo: &TatuBootInfo`. Interrupts
-    /// are masked (DAIF set by arma).
-    /// `#[unsafe(no_mangle)]` is the keep-alive anchor — see
-    /// the matching note in arch_x86_64.
+    /// rust_main receives `bootinfo: &TatuBootInfo`. PMI supplies EL1h with
+    /// DAIF masked and MMU/caches off. The softfloat, strict-align target
+    /// uses no FP/SIMD or unaligned memory instructions, so it does not rely
+    /// on CPACR_EL1 or on permissive SCTLR_EL1 alignment settings.
+    /// `no_mangle` keeps the naked entry alive until linker KEEP retains it.
     #[unsafe(naked)]
     #[unsafe(no_mangle)]
     #[unsafe(link_section = ".tatu.reset.aarch64")]

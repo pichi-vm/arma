@@ -15,8 +15,9 @@
 //! `#[cfg(test)]` modules under `bootinfo` / `merge` / `validate`.
 //!
 //! The crate has no library: tatu is consumed only as a binary by
-//! arma (which reads its ELF section table and entry point). Module
-//! items use `pub(crate)` visibility so nothing escapes the crate.
+//! arma, which packages its ELF sections at their declared addresses. Tatu
+//! owns the fixed entry point and layout. Module items use `pub(crate)`
+//! visibility so nothing escapes the crate.
 
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]

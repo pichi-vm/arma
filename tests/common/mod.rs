@@ -56,17 +56,6 @@ pub(crate) fn build_pmi(
     config: &Path,
     out: &Path,
 ) {
-    build_pmi_with_profile(kernel, initrd, cmdline, "x86-64-v3", config, out);
-}
-
-pub(crate) fn build_pmi_with_profile(
-    kernel: &Path,
-    initrd: Option<&Path>,
-    cmdline: &str,
-    cpu_profile: &str,
-    config: &Path,
-    out: &Path,
-) {
     let mut cmd = Command::new(arma_bin());
     cmd.arg("build")
         .arg("--kernel")
@@ -74,15 +63,23 @@ pub(crate) fn build_pmi_with_profile(
         .arg("--config")
         .arg(config)
         .arg("--cmdline")
-        .arg(cmdline)
-        .arg("--profile")
-        .arg(cpu_profile);
+        .arg(cmdline);
     if let Some(p) = initrd {
         cmd.arg("--initrd").arg(p);
     }
     cmd.arg(out); // positional <output>, last
     let st = cmd.status().expect("spawn arma");
     assert!(st.success(), "arma build failed: {st:?}");
+    let bytes = std::fs::read(out).unwrap();
+    let (offset, size) = find_pmi_vm(&bytes);
+    let manifest: ciborium::Value = ciborium::from_reader(&bytes[offset..offset + size]).unwrap();
+    assert!(
+        !manifest
+            .as_map()
+            .unwrap()
+            .iter()
+            .any(|(key, _)| { key.as_text() == Some("cpu:profile") })
+    );
 }
 
 /// Locate the `.pmi.vm` section in a PE file's section table and
