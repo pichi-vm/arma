@@ -52,6 +52,8 @@ pub(crate) enum DtbError {
     Fdt(#[from] FdtError),
     #[error("Arm GIC ran out of wired SPIs for {requested} virtio-mmio slots")]
     ArmVirtioMmioSpiExhausted { requested: usize },
+    #[error("x86 IOAPIC has too few wired pins for {requested} virtio-mmio slots")]
+    X86VirtioMmioIoapicExhausted { requested: usize },
 }
 
 /// ECAM buses (`bus-range = <0 0x0f>`). Must match `planner::ECAM_BUSES`.
@@ -250,6 +252,51 @@ mod tests {
             aliases.property("serial0").unwrap().as_str(),
             Some("/serial@9000000")
         );
+    }
+
+    #[test]
+    fn x86_virtio_mmio_pins_fit_ioapic() {
+        use devtree::{NodeView, PropertyView, Tree, TreeView};
+
+        let virtio: Vec<_> = (0..22)
+            .map(|i| {
+                let base = 0x0900_1000 + i * 0x200;
+                base..base + 0x200
+            })
+            .collect();
+        for serial in [None, x86_inputs().serial] {
+            let inputs = Inputs {
+                serial,
+                virtio: &virtio[..21],
+                ..x86_inputs()
+            };
+            let bytes = build(&inputs).expect("build DTB with all available IOAPIC pins");
+            let tree: Tree<'_> = Tree::parse(&bytes).expect("parse DTB");
+
+            let uart = tree.find_path("/serial@9000000");
+            assert_eq!(uart.is_some(), inputs.serial.is_some());
+            if let Some(uart) = uart {
+                let cells = uart.property("interrupts").unwrap();
+                assert_eq!(cells.as_u32s().unwrap().collect::<Vec<_>>(), [4, 1]);
+            }
+
+            let expected_pins = (16..24).chain([1, 3]).chain(5..16);
+            for (range, pin) in inputs.virtio.iter().zip(expected_pins) {
+                let base = range.start;
+                let node = tree.find_path(&format!("/virtio_mmio@{base:x}")).unwrap();
+                let cells = node.property("interrupts").unwrap();
+                assert_eq!(cells.as_u32s().unwrap().collect::<Vec<_>>(), [pin, 1]);
+            }
+        }
+
+        let exhausted = Inputs {
+            virtio: &virtio,
+            ..x86_inputs()
+        };
+        assert!(matches!(
+            build(&exhausted),
+            Err(DtbError::X86VirtioMmioIoapicExhausted { requested: 22 })
+        ));
     }
 
     #[test]
