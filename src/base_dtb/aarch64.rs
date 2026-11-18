@@ -112,16 +112,16 @@ pub(super) fn add_platform(
     fdt.property_phandle(V2M_PHANDLE)?;
     fdt.end_node(v2m)?;
 
-    // /timer — armv8 generic timer (4 standard PPIs).
+    // /timer — armv8 generic timer (four standard level-high PPIs).
     let timer = fdt.begin_node("timer")?;
     fdt.property_string("compatible", "arm,armv8-timer")?;
     fdt.property_array_u32(
         "interrupts",
         &[
-            1, 13, 0xff08, // secure phys
-            1, 14, 0xff08, // non-secure phys
-            1, 11, 0xff08, // virtual
-            1, 10, 0xff08, // hyp
+            1, 13, 4, // secure phys
+            1, 14, 4, // non-secure phys
+            1, 11, 4, // virtual
+            1, 10, 4, // hyp
         ],
     )?;
     // The timer's PPIs are routed by the GIC; without interrupt-parent the
