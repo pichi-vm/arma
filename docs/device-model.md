@@ -500,9 +500,8 @@ the platform's addressing and identity.
   supplies a default.
 - **`--profile <profile>`** — vCPU ISA baseline, written to `cpu:profile`; the
   VMM validates it against the host. Defaults to RHEL 9's baseline so a stock
-  RHEL guest runs — `x86-64-v2` (x86-64) or `armv8.0-a` (aarch64) — raised to
-  the kernel's build floor if higher (so a v3-built kernel, e.g. RHEL 10, lands
-  on `x86-64-v3` automatically). Override to require more.
+  RHEL guest runs — `x86-64-v2` (x86-64) or `armv8.0-a` (aarch64).
+  An explicit profile is preserved without adjustment from kernel configuration.
 - **`--serial`** — declare the serial port. Absent ⇒ no UART node.
 - **`--mmio-slots <N>`** — virtio-mmio transport count (see Slot composition).
 - **`--pci-slots <N>`** — PCIe slot count; `0` ⇒ no host bridge **and no 64-bit
