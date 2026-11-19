@@ -56,6 +56,12 @@ const SPI_PIN_MAX: u32 = 987;
 const MSI_INTID_BASE: u32 = 64;
 const MSI_INTID_COUNT: u32 = 32;
 
+pub(super) fn virtio_mmio_irqs() -> impl Iterator<Item = u32> {
+    let msi_intids = MSI_INTID_BASE..MSI_INTID_BASE + MSI_INTID_COUNT;
+    (VIRTIO_MMIO_SPI_BASE..=SPI_PIN_MAX)
+        .filter(move |pin| !msi_intids.contains(&(pin + SPI_INTID_BASE)))
+}
+
 pub(super) fn add_platform(
     fdt: &mut FdtWriter,
     inputs: &super::Inputs<'_>,
@@ -163,9 +169,7 @@ pub(super) fn add_platform(
     // virtio_mmio@… — one transport per slot (A7). Addresses are
     // planner-assigned (Inputs::virtio); each gets its own GIC SPI (edge,
     // positional); the guest probes magic/DeviceID for occupancy.
-    let msi_intids = MSI_INTID_BASE..MSI_INTID_BASE + MSI_INTID_COUNT;
-    let mut wired_spis = (VIRTIO_MMIO_SPI_BASE..=SPI_PIN_MAX)
-        .filter(|pin| !msi_intids.contains(&(pin + SPI_INTID_BASE)));
+    let mut wired_spis = virtio_mmio_irqs();
     for v in inputs.virtio.iter() {
         let base = v.start;
         let size = v.end - v.start;

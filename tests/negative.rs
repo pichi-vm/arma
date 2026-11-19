@@ -79,6 +79,33 @@ fn malformed_kernel_fails_with_unrecognized() {
 }
 
 #[test]
+fn mmio_interrupt_limit_is_checked_before_layout() {
+    let (kernel, _) = host_kernel().expect("real host kernel available");
+    let tmp = TempDir::new().unwrap();
+    let config = tmp.path().join("kernel.config");
+    let out_pmi = tmp.path().join("out.pmi");
+    fs::write(&config, "CONFIG_VIRTIO_MMIO=y\n").unwrap();
+    let (_, stderr) = run_failing(&[
+        "build".as_ref(),
+        "--kernel".as_ref(),
+        kernel.as_os_str(),
+        "--config".as_ref(),
+        config.as_os_str(),
+        "--cmdline".as_ref(),
+        "".as_ref(),
+        "--mmio-slots".as_ref(),
+        "4294967295".as_ref(),
+        "--min-addr-space".as_ref(),
+        "32".as_ref(),
+        out_pmi.as_os_str(),
+    ]);
+    // This count also cannot fit in the requested address space. Report the
+    // interrupt refusal before reaching the planner's address-space error.
+    assert!(stderr.contains("MMIO slot interrupts"), "{stderr}");
+    assert!(!out_pmi.exists());
+}
+
+#[test]
 fn unwritable_output_path_fails() {
     let Some((kernel, config)) = host_kernel() else {
         eprintln!("skip (kernel download failed)");
