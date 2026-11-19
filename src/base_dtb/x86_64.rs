@@ -59,6 +59,12 @@ pub(super) fn reserved() -> Vec<Range<u64>> {
     ]
 }
 
+pub(super) fn virtio_mmio_irqs() -> impl Iterator<Item = u32> {
+    (VIRTIO_MMIO_PIN_BASE..IOAPIC_PIN_COUNT)
+        .chain(0..VIRTIO_MMIO_PIN_BASE)
+        .filter(|&pin| !matches!(pin, 0 | 2 | SERIAL_IOAPIC_PIN))
+}
+
 pub(super) fn add_platform(
     fdt: &mut FdtWriter,
     inputs: &super::Inputs<'_>,
@@ -130,9 +136,7 @@ pub(super) fn add_platform(
 
     // Preserve the existing pins starting at 16 before using lower pins.
     // Linux x86 ACPI excludes GSIs 0 and 2. Keep pin 4 reserved for the UART.
-    let mut pins = (VIRTIO_MMIO_PIN_BASE..IOAPIC_PIN_COUNT)
-        .chain(0..VIRTIO_MMIO_PIN_BASE)
-        .filter(|&pin| !matches!(pin, 0 | 2 | SERIAL_IOAPIC_PIN));
+    let mut pins = virtio_mmio_irqs();
     for v in inputs.virtio.iter() {
         let base = v.start;
         let size = v.end - v.start;

@@ -75,6 +75,20 @@ pub(crate) fn arch_reserved(arch: Arch) -> Vec<Range<u64>> {
     }
 }
 
+/// Reject slot counts the architecture cannot assign interrupts to, before planning.
+pub(crate) fn validate_mmio_slots(arch: Arch, requested: u32) -> Result<(), DtbError> {
+    let requested = requested as usize;
+    match arch {
+        Arch::Aarch64 if requested > aarch64::virtio_mmio_irqs().count() => {
+            Err(DtbError::ArmVirtioMmioSpiExhausted { requested })
+        }
+        Arch::X86_64 if requested > x86_64::virtio_mmio_irqs().count() => {
+            Err(DtbError::X86VirtioMmioIoapicExhausted { requested })
+        }
+        _ => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Build entry point.
 // ---------------------------------------------------------------------------
@@ -207,6 +221,18 @@ fn pci_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mmio_slot_interrupt_limits() {
+        for (arch, limit) in [(Arch::X86_64, 21), (Arch::Aarch64, 940)] {
+            for count in [0, 1, limit] {
+                validate_mmio_slots(arch, count).unwrap();
+            }
+            for count in [limit + 1, u32::MAX] {
+                assert!(validate_mmio_slots(arch, count).is_err());
+            }
+        }
+    }
 
     fn x86_inputs() -> Inputs<'static> {
         Inputs {

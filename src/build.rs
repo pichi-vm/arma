@@ -149,6 +149,7 @@ pub(crate) fn run(args: &BuildArgs) -> Result<()> {
     let (mmio_slots, pci_slots) = kcfg
         .infer_slots(arch, args.mmio_slots, args.pci_slots)
         .context("slot inference")?;
+    base_dtb::validate_mmio_slots(arch, mmio_slots).context("MMIO slot interrupts")?;
 
     // Poweroff drivability: Arma always emits the arch-appropriate poweroff
     // device, but a guest that can drive none of them will hang on `poweroff`
