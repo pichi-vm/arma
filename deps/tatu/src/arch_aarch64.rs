@@ -78,20 +78,19 @@ pub(crate) fn halt() -> ! {
 // ---------------------------------------------------------------------------
 // KASLR: arm64 randomizes its virtual base from `/chosen/kaslr-seed` (a kernel
 // built with CONFIG_RANDOMIZE_BASE reads it and self-relocates). The seed is
-// guest-generated entropy, so it is NOT in the measured base DTB. tatu carries
+// generated at boot, so it is NOT in the measured base DTB. tatu carries
 // a trusted overlay (`crate::kaslr`) that adds `/chosen/kaslr-seed`; here we
-// patch its placeholder with guest entropy and merge it onto the measured base
-// *before* the host overlay. Entropy comes from the guest CPU (RNDR), never the
-// host — and the host overlay is forbidden from contributing /chosen/kaslr-seed
-// (validate_host_dtbo rejects it), so the seed stays guest-controlled (a
-// confidential-computing requirement).
+// patch its placeholder and merge it onto the measured base before the host
+// overlay. RNDR is preferred; the counter fallback provides only best-effort
+// randomization and can be predicted by the host or guest. Host overlays remain
+// forbidden from contributing /chosen/kaslr-seed (validate_host_dtbo rejects it).
 // ---------------------------------------------------------------------------
 
 use devtree::{Overlay, Tree};
 
 /// Prepare the DTB the host overlay will be merged onto. aarch64 injects a
-/// guest-entropy `/chosen/kaslr-seed`: it patches the trusted kaslr overlay
-/// template with fresh entropy and merges it onto the measured `base`, writing
+/// `/chosen/kaslr-seed`: it patches the trusted kaslr overlay
+/// template with a boot-time seed and merges it onto the measured `base`, writing
 /// the result into `scratch` and returning that slice. (The x86 counterpart is
 /// a no-op that returns `base` unchanged — it randomizes via post-merge
 /// relocations.) `scratch` must be large enough for the base plus the seed
@@ -108,7 +107,7 @@ pub(crate) fn prepare_merge_base<'a>(
         return Err(());
     }
     tpl[..n].copy_from_slice(template);
-    if !crate::kaslr::patch_overlay_seed(&mut tpl[..n], rand_u64()) {
+    if !crate::kaslr::patch_overlay_seed(&mut tpl[..n], kaslr_seed()) {
         return Err(());
     }
 
@@ -118,9 +117,10 @@ pub(crate) fn prepare_merge_base<'a>(
     Ok(&scratch[..written])
 }
 
-/// Draw 64 bits of guest entropy via `RNDR`. Halt if it is unavailable or
-/// fails all 100 attempts; never continue with a predictable KASLR seed.
-fn rand_u64() -> u64 {
+/// Prefer RNDR; use the virtual counter if unavailable or exhausted.
+/// The fallback is only for ordinary-VM KASLR, not cryptographic randomness.
+/// A present or unrecognized Realm Services Interface forbids the fallback.
+fn kaslr_seed() -> u64 {
     if cpu_has_rndr() {
         for _ in 0..100 {
             let mut val = 0;
@@ -130,7 +130,43 @@ fn rand_u64() -> u64 {
             }
         }
     }
-    halt()
+    if !counter_fallback_allowed() {
+        halt();
+    }
+    let counter: u64;
+    // SAFETY: CNTVCT_EL0 is readable at EL1 under the VM timer contract.
+    unsafe {
+        core::arch::asm!("mrs {c}, cntvct_el0", c = out(reg) counter, options(nostack, nomem, preserves_flags));
+    }
+    // Spread timing bits without claiming additional entropy. Linux treats a
+    // zero KASLR seed as absent, so keep the fallback nonzero.
+    counter.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1)
+}
+
+/// Probe RSI 1.0 before allowing a weak seed. A real Realm's RMM services this
+/// SMC itself; its response is not delegated to the untrusted host. Only the
+/// explicit SMCCC "not supported" result permits fallback. In particular, an
+/// unsupported RSI revision is not evidence that we are outside a Realm.
+fn counter_fallback_allowed() -> bool {
+    const RSI_ABI_VERSION: u64 = 0xc400_0190;
+    const RSI_REVISION_1_0: u64 = 0x0001_0000;
+    const SMCCC_NOT_SUPPORTED: u64 = u64::MAX;
+    let status: u64;
+    // SAFETY: RSI_ABI_VERSION takes no pointers. Declare caller-saved registers
+    // clobbered across the SMC; no host-provided memory or feature bit is used
+    // to authorize the counter fallback.
+    unsafe {
+        core::arch::asm!(
+            "smc #0",
+            inout("x0") RSI_ABI_VERSION => status,
+            inout("x1") RSI_REVISION_1_0 => _,
+            in("x2") 0u64, in("x3") 0u64, in("x4") 0u64,
+            in("x5") 0u64, in("x6") 0u64, in("x7") 0u64,
+            clobber_abi("C"),
+            options(nostack),
+        );
+    }
+    status == SMCCC_NOT_SUPPORTED
 }
 
 /// Whether the CPU implements FEAT_RNG (`ID_AA64ISAR0_EL1.RNDR`, bits 63:60).

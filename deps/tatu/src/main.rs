@@ -130,7 +130,7 @@ extern "C" fn rust_main(bootinfo: &TatuBootInfo) -> ! {
     }
 
     // 2. Prepare the DTB the host overlay merges onto. On aarch64 this performs
-    //    a first merge: a trusted kaslr overlay (with a fresh guest-entropy
+    //    a first merge: a trusted kaslr overlay (with a boot-time
     //    /chosen/kaslr-seed) is merged onto the measured base into a temporary
     //    stack buffer. The seed is guest-generated, so it never lives in the
     //    measured base DTB. On x86 this is a no-op (the base is used as-is;

@@ -7,7 +7,7 @@
  * kernel reads a fresh, guest-generated `/chosen/kaslr-seed` that never lived in
  * the measured image. The 8-byte seed below is a unique ASCII sentinel
  * ("KASLRSED" = 0x4b41534c 0x52534544): tatu finds it by a plain byte
- * find/replace and overwrites it at boot with guest entropy (RNDR) — no DTB
+ * find/replace and overwrites it at boot with a KASLR seed — no DTB
  * parsing for the patch. See `kaslr.rs` / `arch_aarch64::prepare_merge_base`.
  *
  * Regenerate the committed binary after editing:
