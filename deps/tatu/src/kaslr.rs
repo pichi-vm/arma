@@ -3,17 +3,17 @@
 
 //! arm64 KASLR seed: a trusted overlay tatu merges onto the measured base DTB.
 //!
-//! `kaslr-seed` is guest-generated entropy, so it MUST NOT live in the measured
+//! `kaslr-seed` is generated at boot, so it MUST NOT live in the measured
 //! base DTB (it would make the launch measurement non-deterministic). Instead
 //! tatu carries a tiny pre-serialized overlay — [`KASLR_OVERLAY_TEMPLATE`],
 //! compiled from `kaslr_overlay.dts` with `dtc` and committed alongside it —
 //! whose `/chosen/kaslr-seed` value is the unique sentinel [`SEED_SENTINEL`].
-//! At boot tatu overwrites the sentinel with guest entropy via a plain byte
+//! At boot tatu overwrites the sentinel with a KASLR seed via a plain byte
 //! find/replace ([`patch_overlay_seed`]) — no DTB parsing — and merges the
 //! overlay onto the base *before* the host overlay, so a `CONFIG_RANDOMIZE_BASE`
-//! kernel reads a fresh, guest-controlled seed from the final merged DTB.
+//! kernel reads the boot-time seed from the final merged DTB.
 //!
-//! The entropy source (guest `RNDR`) and the two-merge orchestration live in
+//! Seed selection (RNDR or a best-effort counter fallback) and orchestration live in
 //! `arch_aarch64`; the byte substitution lives here as a pure function so it can
 //! be unit-tested on the host without a guest.
 
