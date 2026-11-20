@@ -223,14 +223,13 @@ single aarch64 interface for all three functions: `SYSTEM_OFF` (poweroff),
 ```dts
 psci {
     compatible = "arm,psci-1.0", "arm,psci-0.2";
-    method = "hvc";    // PSCI calls trap to the hypervisor
+    method = "smc";
 };
 ```
 
-`method = "hvc"` routes PSCI calls to the hypervisor as hypercalls rather than
-`smc` calls to firmware. Bringup spans the base/overlay split: the base declares
-this node, and each overlay-authored `cpu@N` references it with
-`enable-method = "psci"`.
+Tatu and Linux use the same SMC conduit that Arm CCA specifies for Realm PSCI
+and RSI. The base declares PSCI, and each overlay-authored `cpu@N` selects it
+with `enable-method = "psci"`.
 
 #### x86-64 — syscon poweroff/reset; bringup is architectural
 
