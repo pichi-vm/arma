@@ -27,6 +27,57 @@
 use arrayvec::ArrayVec;
 use devtree::{Error as DtError, Fragment, NodeView, OverlayView, PropertyView, Target, TreeView};
 
+#[cfg(any(test, target_arch = "aarch64"))]
+const PSCI_COMPATIBLES: [&str; 3] = ["arm,psci", "arm,psci-0.2", "arm,psci-1.0"];
+
+/// Require the root PSCI declaration to select SMC for Tatu and Linux.
+#[cfg(any(test, target_arch = "aarch64"))]
+pub(crate) fn has_smc_psci(tree: &devtree::Tree<'_>) -> bool {
+    let root = tree.root();
+    let Some(psci) = root.child("psci") else {
+        return false;
+    };
+    let declared = psci.property("compatible").is_some_and(|p| {
+        p.as_strs()
+            .is_some_and(|mut names| names.any(|name| PSCI_COMPATIBLES.contains(&name)))
+    });
+    // Linux looks for a compatible node anywhere in the tree. An overlay
+    // must not introduce a second candidate, even outside /psci.
+    declared
+        && psci_nodes(root) == 1
+        && ["compatible", "method", "status"].iter().all(|name| {
+            psci.properties()
+                .filter(|p| p.name() == *name)
+                .nth(1)
+                .is_none()
+        })
+        && psci
+            .property("method")
+            .is_some_and(|p| p.as_str() == Some("smc"))
+        && psci
+            .property("status")
+            .is_none_or(|p| matches!(p.as_str(), Some("ok" | "okay")))
+}
+
+#[cfg(any(test, target_arch = "aarch64"))]
+fn matches_psci(node: &impl NodeView) -> bool {
+    node.properties()
+        .filter(|p| p.name() == "compatible")
+        .any(|p| {
+            p.as_ref().split(|&b| b == 0).any(|value| {
+                PSCI_COMPATIBLES
+                    .iter()
+                    .any(|name| value.eq_ignore_ascii_case(name.as_bytes()))
+            })
+        })
+}
+
+#[cfg(any(test, target_arch = "aarch64"))]
+fn psci_nodes(node: impl NodeView) -> usize {
+    // Tree::parse has already checked its depth limit.
+    usize::from(matches_psci(&node)) + node.children().map(psci_nodes).sum::<usize>()
+}
+
 // §4.5 compile-time maxima.
 pub(crate) const MAX_CPUS: usize = 2048;
 pub(crate) const MAX_MEMORY_REGIONS: usize = 32;
@@ -634,6 +685,55 @@ mod tests {
         child.stdin.take()?.write_all(dts.as_bytes()).ok()?;
         let out = child.wait_with_output().ok()?;
         out.status.success().then_some(out.stdout)
+    }
+
+    #[test]
+    fn arm_requires_an_unambiguous_smc_psci_declaration() {
+        use devtree::{OwnedNode, OwnedProperty, OwnedTree};
+
+        let dtb = |root| OwnedTree::new(root).encode().unwrap();
+        let base_bytes = |compatible: &[u8], method: Option<&str>, status: Option<&str>| {
+            let mut psci = OwnedNode::new("psci")
+                .with_property(OwnedProperty::new("compatible").with_bytes(compatible.to_vec()));
+            if let Some(method) = method {
+                psci.set_property(OwnedProperty::new("method").with_str(method));
+            }
+            if let Some(status) = status {
+                psci.set_property(OwnedProperty::new("status").with_str(status));
+            }
+            dtb(OwnedNode::new("").with_child(psci))
+        };
+        let compatible = b"arm,psci-0.2\0";
+        let blob = base_bytes(compatible, Some("smc"), None);
+        let base: Tree<'_> = Tree::parse(&blob).unwrap();
+        assert!(has_smc_psci(&base));
+        for blob in [
+            dtb(OwnedNode::new("")),
+            base_bytes(compatible, Some("hvc"), None),
+            base_bytes(compatible, None, None),
+            base_bytes(compatible, Some("smc"), Some("disabled")),
+            base_bytes(b"arm,psci-0.2", Some("smc"), None),
+            base_bytes(b"arm,psci-0.2\0\xff\0", Some("smc"), None),
+        ] {
+            let tree: Tree<'_> = Tree::parse(&blob).unwrap();
+            assert!(!has_smc_psci(&tree));
+        }
+
+        let shadow = OwnedNode::new("fw")
+            .with_property(OwnedProperty::new("compatible").with_str("ARM,PSCI-1.0"))
+            .with_property(OwnedProperty::new("method").with_str("hvc"));
+        let distance_map = OwnedNode::new("distance-map").with_child(shadow);
+        let overlay = OwnedNode::new("__overlay__").with_child(distance_map);
+        let fragment = OwnedNode::new("fragment@0")
+            .with_property(OwnedProperty::new("target-path").with_str("/"))
+            .with_child(overlay);
+        let blob = dtb(OwnedNode::new("").with_child(fragment));
+        let overlay: Overlay<'_> = Overlay::parse(&blob).unwrap();
+        validate_host_dtbo(&overlay, &base).unwrap();
+        let mut merged = [0; 4096];
+        let size = overlay.apply(&base, &mut merged).unwrap();
+        let tree: Tree<'_> = Tree::parse(&merged[..size]).unwrap();
+        assert!(!has_smc_psci(&tree));
     }
 
     const MINIMAL_BASE: &str = r"/dts-v1/;

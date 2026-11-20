@@ -99,6 +99,10 @@ pub(crate) fn prepare_merge_base<'a>(
     base: &'a [u8],
     scratch: &'a mut [u8],
 ) -> Result<&'a [u8], ()> {
+    let base_tree = Tree::parse(base).map_err(|_| ())?;
+    if !crate::validate::has_smc_psci(&base_tree) {
+        crate::panic_halt(b"base dtb: SMC PSCI required");
+    }
     // Copy the read-only template into a mutable buffer and patch the seed.
     let template = crate::kaslr::KASLR_OVERLAY_TEMPLATE;
     let mut tpl = [0u8; 512];
@@ -112,7 +116,6 @@ pub(crate) fn prepare_merge_base<'a>(
     }
 
     let overlay = Overlay::parse(&tpl[..n]).map_err(|_| ())?;
-    let base_tree = Tree::parse(base).map_err(|_| ())?;
     let written = crate::merge::merge_into(&base_tree, overlay, scratch).map_err(|_| ())?;
     Ok(&scratch[..written])
 }

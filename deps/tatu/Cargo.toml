@@ -19,6 +19,9 @@ doctest = false
 devtree.workspace = true
 arrayvec = { version = "0.7", default-features = false }
 
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
+devtree = { workspace = true, features = ["alloc"] }
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 dtb2acpi = { path = "deps/dtb2acpi" }
 dtb2e820 = { path = "deps/dtb2e820" }

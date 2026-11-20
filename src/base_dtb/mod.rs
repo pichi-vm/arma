@@ -322,10 +322,13 @@ mod tests {
     }
 
     #[test]
-    fn build_aarch64_succeeds() {
+    fn build_aarch64_declares_smc_psci() {
+        use devtree::{NodeView, PropertyView, Tree, TreeView};
+
         let bytes = build(&arm_inputs()).expect("build");
-        let magic = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-        assert_eq!(magic, 0xd00d_feed);
+        let tree: Tree<'_> = Tree::parse(&bytes).expect("parse aarch64 DTB");
+        let psci = tree.find_path("/psci").expect("PSCI present");
+        assert_eq!(psci.property("method").unwrap().as_str(), Some("smc"));
     }
 
     #[test]

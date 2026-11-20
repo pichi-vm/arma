@@ -132,13 +132,13 @@ pub(super) fn add_platform(
 
     // /psci — root-level (A2): SYSTEM_OFF, SYSTEM_RESET, CPU_ON. Per
     // arm,psci.yaml the node is a root child, not under a /firmware wrapper;
-    // method = "hvc" traps PSCI calls to the hypervisor.
+    // Linux uses the same SMC conduit as Tatu and Realm guests.
     let psci = fdt.begin_node("psci")?;
     fdt.property_string_list(
         "compatible",
         vec!["arm,psci-1.0".to_string(), "arm,psci-0.2".to_string()],
     )?;
-    fdt.property_string("method", "hvc")?;
+    fdt.property_string("method", "smc")?;
     fdt.end_node(psci)?;
 
     // serial@… — ns16550a over MMIO (A4). The 8250 driver is built into every
