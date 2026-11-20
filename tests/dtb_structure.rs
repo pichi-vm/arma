@@ -241,7 +241,7 @@ fn aarch64_psci_present_at_root() {
     let tree: Tree<'_> = Tree::parse(&dtb).unwrap();
     // A2: PSCI is a root-level node (arm,psci.yaml), not under /firmware.
     let psci = tree.find_path("/psci").expect("/psci present at root");
-    assert_eq!(prop_str(&psci, "method").as_deref(), Some("hvc"));
+    assert_eq!(prop_str(&psci, "method").as_deref(), Some("smc"));
 }
 
 #[test]
