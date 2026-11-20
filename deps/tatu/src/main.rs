@@ -247,15 +247,13 @@ fn finalize(
 }
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
-fn finalize(
-    _merged: &Tree<'_>,
-    bootinfo: &TatuBootInfo,
-    merged_gpa: u64,
-    _merged_size: usize,
-) -> ! {
+fn finalize(merged: &Tree<'_>, bootinfo: &TatuBootInfo, merged_gpa: u64, _merged_size: usize) -> ! {
+    use crate::bootinfo::kernel_bytes;
     use arch::{MergedDtb, boot_kernel};
 
-    use crate::bootinfo::kernel_bytes;
+    if !validate::has_smc_psci(merged) {
+        panic_halt(b"merged dtb: SMC PSCI required");
+    }
     let dtb = MergedDtb { gpa: merged_gpa };
     boot_kernel(kernel_bytes(bootinfo), dtb)
 }

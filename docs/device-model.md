@@ -231,6 +231,10 @@ Tatu and Linux use the same SMC conduit that Arm CCA specifies for Realm PSCI
 and RSI. The base declares PSCI, and each overlay-authored `cpu@N` selects it
 with `enable-method = "psci"`.
 
+Tatu checks the effective base DTB for an enabled SMC PSCI declaration before
+probing RSI. It checks the merged DTB again before handing it to Linux because
+Linux searches the whole tree for a PSCI-compatible node.
+
 #### x86-64 — syscon poweroff/reset; bringup is architectural
 
 x86 has no unified power interface, so the three functions separate:
